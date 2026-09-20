@@ -23,6 +23,8 @@
 #include <linux/soc/apple/rtkit.h>
 #include <linux/string.h>
 #include <linux/err.h>
+#include <linux/module.h>
+#include <linux/mux/driver.h>
 #include <linux/usb/typec.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
@@ -50,6 +52,16 @@
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
 
 static bool show_notch;
+
+/*
+ * apple-display-crossbar mux indices: 0=dpphy (DP alt-mode), 1=dpin0, 2=dpin1.
+ * USB4 tunnels need a DP IN, not the ATC PHY. Default dpin0; override with
+ * appledrm.usb4_dpin=2 if DPRX still fails.
+ */
+static int usb4_dpin_index = 1;
+module_param_named(usb4_dpin, usb4_dpin_index, int, 0644);
+MODULE_PARM_DESC(usb4_dpin,
+		 "Display crossbar mux index for USB4 DP IN (1=dpin0, 2=dpin1)");
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 
@@ -588,6 +600,9 @@ static void dcp_typec_route_unregister(void *data)
 	struct apple_dcp_typec_port *port = route->port;
 
 	typec_mux_unregister(route->typec_mux);
+	if (route->usb4_xbar && !route->usb4_xbar_borrowed)
+		mux_control_put(route->usb4_xbar);
+	route->usb4_xbar = NULL;
 
 	guard(mutex)(&dcp_typec_fabric_lock);
 	if (port->owner == route) {
@@ -664,13 +679,29 @@ static int dcp_register_typec_routes(struct apple_dcp *dcp)
 
 		{
 			char usb4_name[16];
+			struct mux_control *usb4_mux;
+			struct mux_chip *chip;
 
 			snprintf(usb4_name, sizeof(usb4_name), "typec%u-usb4",
 				 route_index);
-			route->usb4_xbar = devm_mux_control_get(dev, usb4_name);
-			if (IS_ERR(route->usb4_xbar)) {
-				if (PTR_ERR(route->usb4_xbar) == -EPROBE_DEFER)
-					return -EPROBE_DEFER;
+			usb4_mux = mux_control_get_optional(dev, usb4_name);
+			if (IS_ERR(usb4_mux) &&
+			    PTR_ERR(usb4_mux) == -EPROBE_DEFER)
+				return -EPROBE_DEFER;
+			if (!IS_ERR_OR_NULL(usb4_mux)) {
+				route->usb4_xbar = usb4_mux;
+				route->usb4_xbar_borrowed = false;
+			} else if (route->xbar && route->xbar->chip &&
+				   usb4_dpin_index >= 0 &&
+				   usb4_dpin_index <
+					   (int)route->xbar->chip->controllers) {
+				chip = route->xbar->chip;
+				route->usb4_xbar = &chip->mux[usb4_dpin_index];
+				route->usb4_xbar_borrowed = true;
+				dev_info(dev,
+					 "typec%u USB4 DP IN using crossbar mux %d\n",
+					 route_index, usb4_dpin_index);
+			} else {
 				route->usb4_xbar = NULL;
 			}
 		}
