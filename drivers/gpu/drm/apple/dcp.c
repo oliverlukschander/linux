@@ -50,6 +50,7 @@
 #define APPLE_DCP_COPROC_CPU_CONTROL_RUN BIT(4)
 
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
+#define DPTX_USB4_CONNECT_DELAY msecs_to_jiffies(2500)
 
 static bool show_notch;
 
@@ -422,9 +423,22 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 		if (port->owner && port->owner->usb4_selected) {
 			struct apple_dcp *dcp = port->owner->dcp;
 
+			/*
+			 * Do not connect DPTX here: ACIO's DP tunnel is not
+			 * up yet, and dcp_dptx_connect waits 2s under this
+			 * lock. Arm reconnect so AUX/DPRX run in the tunnel
+			 * window (~1s up, ~12s teardown).
+			 */
 			WRITE_ONCE(dcp->typec_cable_connected, true);
 			port->hpd = true;
-			dcp_dptx_connect_oob(to_platform_device(dcp->dev), 0);
+			dcp->typec_reconnect_tries = 0;
+			cancel_delayed_work(&dcp->typec_reconnect_wq);
+			mod_delayed_work(system_freezable_wq,
+					 &dcp->typec_reconnect_wq,
+					 DPTX_USB4_CONNECT_DELAY);
+			dev_info(dcp->dev,
+				 "USB4 DP IN armed; DPTX connect in %u ms\n",
+				 jiffies_to_msecs(DPTX_USB4_CONNECT_DELAY));
 		}
 		return 0;
 	}
@@ -1085,7 +1099,7 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
-#define DPTX_RECONNECT_RETRIES 5
+#define DPTX_RECONNECT_RETRIES 10
 
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
