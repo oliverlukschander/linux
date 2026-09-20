@@ -34,10 +34,13 @@ struct apple_dcp_typec_route {
 	struct list_head port_link;
 	struct phy *phy;
 	struct mux_control *xbar;
+	/* Crossbar dpin0/dpin1: USB4 DP IN. Optional; NULL if DT only has dpphy. */
+	struct mux_control *usb4_xbar;
 	struct typec_mux_dev *typec_mux;
 	u32 dptx_phy;
 	u32 mux_index;
 	bool selected;
+	bool usb4_selected;
 };
 
 bool dcp_is_typec_output(struct apple_dcp *dcp);

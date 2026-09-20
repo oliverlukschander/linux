@@ -22,6 +22,8 @@
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/string.h>
+#include <linux/err.h>
+#include <linux/usb/typec.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_mux.h>
@@ -115,9 +117,18 @@ static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 	       !dcp_typec_route_fixed_output_busy(route);
 }
 
-static int dcp_typec_route_activate(struct apple_dcp_typec_route *route);
+static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
+				    bool usb4);
 static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route);
 static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port);
+
+static struct mux_control *
+dcp_typec_route_mux(struct apple_dcp_typec_route *route)
+{
+	if (route->usb4_selected && route->usb4_xbar)
+		return route->usb4_xbar;
+	return route->xbar;
+}
 
 /*
  * Pipelines are ranked by CRTC index so the fabric's choice is a pure function
@@ -135,10 +146,15 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
-static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
+static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
+				    bool usb4)
 {
 	struct apple_dcp *dcp = route->dcp;
+	struct mux_control *mux;
 	int ret;
+
+	if (usb4 && !route->usb4_xbar)
+		return -ENODEV;
 
 	/*
 	 * The fixed output's HPD handler leaves disconnects to DCP, so the port
@@ -154,7 +170,8 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 		dcp->fixed_route_selected = false;
 	}
 
-	ret = mux_control_select(route->xbar, route->mux_index);
+	mux = usb4 ? route->usb4_xbar : route->xbar;
+	ret = mux_control_select(mux, route->mux_index);
 	if (ret) {
 		if (dcp->xbar) {
 			int restore_ret;
@@ -170,6 +187,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 		}
 		return ret;
 	}
+	route->usb4_selected = usb4;
 
 	dcp->phy = route->phy;
 	dcp->dptx_phy = route->dptx_phy;
@@ -196,7 +214,8 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 	dcp->active_typec_route = route;
 	route->selected = true;
 
-	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u\n", route->dptx_phy);
+	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u (%s)\n",
+		 route->dptx_phy, usb4 ? "USB4 DP IN" : "DP alt-mode");
 	return 0;
 }
 
@@ -205,11 +224,12 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 	struct apple_dcp *dcp = route->dcp;
 	int ret;
 
-	ret = mux_control_deselect(route->xbar);
+	ret = mux_control_deselect(dcp_typec_route_mux(route));
 	if (ret)
 		return ret;
 
 	route->selected = false;
+	route->usb4_selected = false;
 	if (dcp->active_typec_route == route)
 		dcp->active_typec_route = NULL;
 
@@ -332,7 +352,9 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 	port->applied_valid = true;
 
 	if (!is_dp) {
-		if (port->owner) {
+		bool usb4 = state->mode == TYPEC_MODE_USB4;
+
+		if (port->owner && !(usb4 && port->owner->usb4_selected)) {
 			struct apple_dcp *dcp = port->owner->dcp;
 
 			if (port->hpd || dcp->typec_cable_connected ||
@@ -349,8 +371,49 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 				dcp_dptx_connect(dcp, 0);
 		}
 
-		if (state->mode == TYPEC_MODE_USB4)
+		if (!usb4) {
 			dcp_typec_retrain_active_routes();
+			return 0;
+		}
+
+		/*
+		 * USB4: DP is tunneled through ACIO DP IN, not the ATC PHY.
+		 * Select the optional dpin mux and start DPTX so DPRX can
+		 * complete on the USB4 DP tunnel (0:5 <-> hub DP OUT).
+		 */
+		if (!port->owner) {
+			list_for_each_entry(candidate, &port->routes, port_link) {
+				unsigned int score;
+
+				if (!candidate->usb4_xbar)
+					continue;
+				if (!dcp_typec_route_available(candidate))
+					continue;
+				score = dcp_typec_route_score(candidate);
+				if (score < best_score) {
+					best = candidate;
+					best_score = score;
+				}
+			}
+
+			if (!best) {
+				dcp_typec_retrain_active_routes();
+				return 0;
+			}
+
+			ret = dcp_typec_route_activate(best, true);
+			if (ret)
+				return ret;
+			port->owner = best;
+		}
+
+		if (port->owner && port->owner->usb4_selected) {
+			struct apple_dcp *dcp = port->owner->dcp;
+
+			WRITE_ONCE(dcp->typec_cable_connected, true);
+			port->hpd = true;
+			dcp_dptx_connect_oob(to_platform_device(dcp->dev), 0);
+		}
 		return 0;
 	}
 
@@ -370,7 +433,7 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 		if (!best)
 			return -EBUSY;
 
-		ret = dcp_typec_route_activate(best);
+		ret = dcp_typec_route_activate(best, false);
 		if (ret)
 			return ret;
 		port->owner = best;
@@ -598,6 +661,19 @@ static int dcp_register_typec_routes(struct apple_dcp *dcp)
 		if (IS_ERR(route->xbar))
 			return dev_err_probe(dev, PTR_ERR(route->xbar),
 					     "%pOF: failed to get display crossbar\n", route_np);
+
+		{
+			char usb4_name[16];
+
+			snprintf(usb4_name, sizeof(usb4_name), "typec%u-usb4",
+				 route_index);
+			route->usb4_xbar = devm_mux_control_get(dev, usb4_name);
+			if (IS_ERR(route->usb4_xbar)) {
+				if (PTR_ERR(route->usb4_xbar) == -EPROBE_DEFER)
+					return -EPROBE_DEFER;
+				route->usb4_xbar = NULL;
+			}
+		}
 
 		ret = of_property_read_u32_index(dev->of_node, "apple,typec-mux-indices",
 						 route_index, &route->mux_index);
