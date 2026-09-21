@@ -1302,7 +1302,7 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
-#define DPTX_RECONNECT_RETRIES 6
+#define DPTX_RECONNECT_RETRIES 1
 
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {

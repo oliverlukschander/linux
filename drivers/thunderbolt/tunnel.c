@@ -99,6 +99,8 @@ module_param(bw_alloc_mode, bool, 0444);
 MODULE_PARM_DESC(bw_alloc_mode,
 		 "enable bandwidth allocation mode if supported (default: true)");
 
+static void tb_dp_dump_apple(struct tb_tunnel *tunnel);
+
 static bool tb_nhi_is_apple(const struct tb_nhi *nhi)
 {
 	struct device_node *np;
@@ -1121,6 +1123,7 @@ static void tb_dp_dprx_work(struct work_struct *work)
 			if (tb_nhi_is_apple(tb->nhi)) {
 				tb_tunnel_warn(tunnel,
 					       "Apple: DPRX timeout, keeping DP tunnel\n");
+				tb_dp_dump_apple(tunnel);
 				tb_tunnel_set_active(tunnel, true);
 			}
 		} else {
@@ -1207,6 +1210,9 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 		if (ret)
 			return ret;
 	}
+
+	if (active && tb_nhi_is_apple(tunnel->tb->nhi))
+		tb_dp_dump_apple(tunnel);
 
 	return active ? tb_dp_dprx_start(tunnel) : 0;
 }
@@ -1560,6 +1566,32 @@ static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
 	}
 
 	return 0;
+}
+
+static void tb_dp_dump_apple_adapter(struct tb_port *port, const char *tag)
+{
+	u32 w[9];
+	int i, ret;
+
+	for (i = 0; i <= 8; i++) {
+		ret = tb_port_read(port, &w[i], TB_CFG_PORT,
+				   port->cap_adap + i, 1);
+		if (ret)
+			w[i] = 0xffffffff;
+	}
+	tb_port_warn(port,
+		     "%s CS0=%08x CS1=%08x CS2=%08x CS3=%08x LOCAL=%08x REMOTE=%08x STAT=%08x COMMON=%08x CS8=%08x VE=%u AE=%u HPD=%u DPRX=%u\n",
+		     tag, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8],
+		     !!(w[0] & ADP_DP_CS_0_VE), !!(w[0] & ADP_DP_CS_0_AE),
+		     !!(w[2] & ADP_DP_CS_2_HPD),
+		     !!(w[7] & DP_COMMON_CAP_DPRX_DONE));
+}
+
+static void tb_dp_dump_apple(struct tb_tunnel *tunnel)
+{
+	tb_dp_dump_apple_adapter(tunnel->src_port, "DP IN");
+	if (tb_port_is_dpout(tunnel->dst_port))
+		tb_dp_dump_apple_adapter(tunnel->dst_port, "DP OUT");
 }
 
 static void tb_dp_dump(struct tb_tunnel *tunnel)
