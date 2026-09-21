@@ -1438,10 +1438,10 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up. Bind DPIN with ATC=0 and USB4 CORE
-		 * (default 1 = dpin0). 0071 moved analog +0x18 0x17→0x09
-		 * on 0x9001. request_display on that CORE=1 port. Do not
-		 * request_display on 0x9000. No lpdptxphy core+0x10.
+		 * Analog PHY is up. Bind DPIN CORE=1 (0x9001). 0073
+		 * GET_SUPPORTS_HPD=1 stopped 22/24; analog latched
+		 * +0x18=0x1017. set_hpd after request_display so the
+		 * nub sees HPD. No lpdptxphy core+0x10.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
@@ -1468,19 +1468,20 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN connect core=%u atc=0 HPD: %d\n",
 					 core, c);
-				if (!c)
-					h = dptxport_set_hpd(
-						dcp->dptxport[port].service,
-						true);
-				dev_info(dcp->dev,
-					 "USB4: analog DPIN set_hpd: %d\n", h);
-				if (!h) {
+				if (!c) {
 					r = dptxport_request_display(
 						dcp->dptxport[port].service);
 					dev_info(dcp->dev,
 						 "USB4: analog DPIN request_display core=%u: %d\n",
 						 core, r);
 				}
+				if (!r)
+					h = dptxport_set_hpd(
+						dcp->dptxport[port].service,
+						true);
+				dev_info(dcp->dev,
+					 "USB4: analog DPIN set_hpd after request_display: %d\n",
+					 h);
 				break;
 			}
 			mutex_unlock(&dcp->hpd_mutex);
