@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/platform_data/x86/apple.h>
 
@@ -1954,16 +1955,21 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		 * loaded or not all DP cables where connected to the
 		 * discrete router.
 		 *
-		 * In both cases we remove the DP IN adapter from the
-		 * available resources as it is not usable. This will
-		 * also tear down the tunnel and try to re-use the
-		 * released DP OUT.
-		 *
-		 * It will be added back only if there is hotplug for
-		 * the DP IN again.
+		 * On Apple Silicon, DPTX talks AUX through the DP IN
+		 * adapter after the tunnel paths exist. Tearing the
+		 * tunnel down on DPRX timeout makes that impossible.
+		 * Keep the tunnel; DPTX can still fail independently.
 		 */
-		tb_tunnel_warn(tunnel, "not active, tearing down\n");
-		tb_dp_resource_unavailable(tb, in, "DPRX negotiation failed");
+		if (tb->nhi && tb->nhi->dev && tb->nhi->dev->of_node &&
+		    of_device_is_compatible(tb->nhi->dev->of_node,
+					    "apple,t8103-usb4-nhi")) {
+			tb_tunnel_warn(tunnel,
+				       "Apple: DPRX not done, keeping DP tunnel\n");
+		} else {
+			tb_tunnel_warn(tunnel, "not active, tearing down\n");
+			tb_dp_resource_unavailable(tb, in,
+						   "DPRX negotiation failed");
+		}
 	}
 	mutex_unlock(&tb->lock);
 

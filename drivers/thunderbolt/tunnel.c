@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/ktime.h>
+#include <linux/of.h>
 #include <linux/string_helpers.h>
 
 #include "tunnel.h"
@@ -97,6 +98,18 @@ static bool bw_alloc_mode = true;
 module_param(bw_alloc_mode, bool, 0444);
 MODULE_PARM_DESC(bw_alloc_mode,
 		 "enable bandwidth allocation mode if supported (default: true)");
+
+static bool tb_nhi_is_apple(const struct tb_nhi *nhi)
+{
+	struct device_node *np;
+
+	if (!nhi || !nhi->dev)
+		return false;
+	np = nhi->dev->of_node;
+	if (!np && nhi->dev->parent)
+		np = nhi->dev->parent->of_node;
+	return np && of_device_is_compatible(np, "apple,t8103-usb4-nhi");
+}
 
 static const char * const tb_tunnel_names[] = { "PCI", "DP", "DMA", "USB3" };
 
@@ -1105,6 +1118,11 @@ static void tb_dp_dprx_work(struct work_struct *work)
 				mutex_unlock(&tb->lock);
 				return;
 			}
+			if (tb_nhi_is_apple(tb->nhi)) {
+				tb_tunnel_warn(tunnel,
+					       "Apple: DPRX timeout, keeping DP tunnel\n");
+				tb_tunnel_set_active(tunnel, true);
+			}
 		} else {
 			tb_tunnel_set_active(tunnel, true);
 		}
@@ -1125,6 +1143,12 @@ static int tb_dp_dprx_start(struct tb_tunnel *tunnel)
 	tb_tunnel_get(tunnel);
 
 	tunnel->dprx_started = true;
+
+	if (tb_nhi_is_apple(tunnel->tb->nhi)) {
+		tb_tunnel_warn(tunnel,
+			       "Apple: DP tunnel paths up, not waiting for DPRX\n");
+		tb_tunnel_set_active(tunnel, true);
+	}
 
 	if (tunnel->callback) {
 		tunnel->dprx_timeout = dprx_timeout_to_ktime(dprx_timeout);
