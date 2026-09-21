@@ -213,7 +213,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	 */
 	dcp_dptx_disconnect(dcp, 0);
 
-	if (dcp->fixed_route_selected) {
+	if (dcp->fixed_route_selected && !usb4) {
 		ret = mux_control_deselect(dcp->xbar);
 		if (ret)
 			return ret;
@@ -1291,7 +1291,7 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
-#define DPTX_RECONNECT_RETRIES 10
+#define DPTX_RECONNECT_RETRIES 3
 
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
@@ -2445,12 +2445,25 @@ static void dcp_platform_remove(struct platform_device *pdev)
 
 static void dcp_platform_shutdown(struct platform_device *pdev)
 {
+	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+
+	if (dcp) {
+		WRITE_ONCE(dcp->typec_cable_connected, false);
+		cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
+		cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
+	}
+	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 	component_del(&pdev->dev, &dcp_comp_ops);
 }
 
 static int dcp_platform_suspend(struct device *dev)
 {
 	struct apple_dcp *dcp = dev_get_drvdata(dev);
+
+	WRITE_ONCE(dcp->typec_cable_connected, false);
+	cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
+	cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
+	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);
