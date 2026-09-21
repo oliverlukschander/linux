@@ -1445,9 +1445,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			if (!v)
 				c = dptxport_connect(dcp->dptxport[port].service,
 						     0, 0, dcp->dptx_die,
-						     false);
+						     true);
 			dev_info(dcp->dev,
-				 "USB4: analog DPIN connect atc=0 no-HPD: %d\n",
+				 "USB4: analog DPIN connect atc=0 HPD: %d\n",
 				 c);
 			if (!c)
 				h = dptxport_set_hpd(dcp->dptxport[port].service,
