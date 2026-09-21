@@ -1541,6 +1541,18 @@ out_unlock:
 	return ret;
 }
 
+static void usb4_restore_edp_work(struct work_struct *work)
+{
+	usb4_force_dptx = false;
+	if (usb4_lpdptx_phy)
+		phy_set_mode_ext(usb4_lpdptx_phy, PHY_MODE_DP, 0);
+	if (usb4_armed_dcp)
+		dev_info(usb4_armed_dcp->dev,
+			 "USB4: auto-restore lpdptxphy DCP index 0 (eDP)\n");
+}
+
+static DECLARE_DELAYED_WORK(usb4_restore_edp_wq, usb4_restore_edp_work);
+
 static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
 {
 	int v, ret;
@@ -1549,6 +1561,7 @@ static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
 	if (ret)
 		return ret;
 	if (v == 0) {
+		cancel_delayed_work_sync(&usb4_restore_edp_wq);
 		usb4_force_dptx = false;
 		if (usb4_lpdptx_phy)
 			phy_set_mode_ext(usb4_lpdptx_phy, PHY_MODE_DP, 0);
@@ -1564,8 +1577,9 @@ static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
 
 	usb4_force_dptx = true;
 	dev_info(usb4_armed_dcp->dev,
-		 "USB4: user DPTX train (full analog; blanks eDP)\n");
+		 "USB4: user DPTX train (full analog; blanks eDP; auto-restore 10s)\n");
 	ret = dcp_dptx_connect(usb4_armed_dcp, 0);
+	schedule_delayed_work(&usb4_restore_edp_wq, 10 * HZ);
 	return ret ? ret : 0;
 }
 
