@@ -292,8 +292,17 @@ static int apple_cio_rtkit_shmem_setup(void *cookie, struct apple_rtkit_shmem *b
 	return 0;
 }
 
+static void apple_cio_rtkit_recv(void *cookie, u8 endpoint, u64 message)
+{
+	struct apple_cio *acio = cookie;
+
+	dev_info(acio->dev, "ACIO RTKit ep=%u msg=0x%016llx\n", endpoint,
+		 message);
+}
+
 static const struct apple_rtkit_ops apple_cio_rtkit_ops = {
 	.shmem_setup = apple_cio_rtkit_shmem_setup,
+	.recv_message = apple_cio_rtkit_recv,
 };
 
 static int apple_nhi_probe_irqs(struct apple_nhi *anhi)
@@ -645,7 +654,7 @@ static int apple_nhi_pci_tunnel_post_activate(struct tb_nhi *nhi)
 }
 
 #define APPLE_DP_AUX_POLL_MS		500
-#define APPLE_DP_AUX_POLL_MAX		40
+#define APPLE_DP_AUX_POLL_MAX		24
 
 /*
  * apple,tunable-rc programs two analog PHY blocks inside the already-mapped
@@ -772,6 +781,32 @@ static void apple_dp_dump_rc_range(struct apple_cio *acio, u32 base, u32 len,
 static void apple_dp_dump_rc(struct apple_cio *acio)
 {
 	apple_dp_dump_rc_range(acio, 0, 0x100, "ctrl", true);
+}
+
+static void apple_dp_dump_vse(struct tb_switch *sw)
+{
+	char buf[320];
+	int cap, i, n = 0, ret;
+	u32 w;
+
+	cap = tb_switch_find_vse_cap(sw, TB_VSE_CAP_APPLE);
+	if (cap < 0) {
+		tb_sw_warn(sw, "Apple VSE cap missing: %d\n", cap);
+		return;
+	}
+	for (i = 0; i < 16; i++) {
+		ret = tb_sw_read(sw, &w, TB_CFG_SWITCH, cap + i, 1);
+		if (ret)
+			w = 0xffffffff;
+		n += scnprintf(buf + n, sizeof(buf) - n, " %02x=%08x", i, w);
+		if (n >= (int)sizeof(buf) - 20) {
+			tb_sw_warn(sw, "Apple VSE cap=%d:%s\n", cap, buf);
+			n = 0;
+			buf[0] = '\0';
+		}
+	}
+	if (n)
+		tb_sw_warn(sw, "Apple VSE cap=%d:%s\n", cap, buf);
 }
 
 static void apple_dp_dump_analog(struct apple_cio *acio, const char *tag)
@@ -984,6 +1019,7 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	WRITE_ONCE(apple_dpin_anhi, anhi);
 
 	apple_dp_dump_rc(anhi->acio);
+	apple_dp_dump_vse(in->sw);
 	dev_info(anhi->dev,
 		 "DP IN analog block 0x%x (port %u) dpin_aux=%d (0=hands-off)\n",
 		 anhi->analog_base, in->port, apple_dpin_aux);
