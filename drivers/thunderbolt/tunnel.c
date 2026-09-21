@@ -7,11 +7,18 @@
  */
 
 #include <linux/delay.h>
+#include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/ktime.h>
 #include <linux/of.h>
+#include <linux/string.h>
 #include <linux/string_helpers.h>
+
+int tb_apple_dp_in_hpd;
+EXPORT_SYMBOL_GPL(tb_apple_dp_in_hpd);
+int tb_apple_dp_typec_index = -1;
+EXPORT_SYMBOL_GPL(tb_apple_dp_typec_index);
 
 #include "tunnel.h"
 #include "tb.h"
@@ -1587,11 +1594,41 @@ static void tb_dp_dump_apple_adapter(struct tb_port *port, const char *tag)
 		     !!(w[7] & DP_COMMON_CAP_DPRX_DONE));
 }
 
+static int tb_apple_nhi_typec_index(struct tb_nhi *nhi)
+{
+	const char *name;
+
+	if (!nhi || !nhi->dev)
+		return -1;
+	name = dev_name(nhi->dev);
+	if (strstr(name, "701f"))
+		return 0;
+	if (strstr(name, "b01f"))
+		return 1;
+	if (strstr(name, "f01f"))
+		return 2;
+	return -1;
+}
+
 static void tb_dp_dump_apple(struct tb_tunnel *tunnel)
 {
+	u32 cs2 = 0;
+	int hpd;
+
 	tb_dp_dump_apple_adapter(tunnel->src_port, "DP IN");
 	if (tb_port_is_dpout(tunnel->dst_port))
 		tb_dp_dump_apple_adapter(tunnel->dst_port, "DP OUT");
+
+	if (!tb_port_read(tunnel->src_port, &cs2, TB_CFG_PORT,
+			  tunnel->src_port->cap_adap + ADP_DP_CS_2, 1)) {
+		hpd = !!(cs2 & ADP_DP_CS_2_HPD);
+		tb_apple_dp_in_hpd = hpd;
+		tb_apple_dp_typec_index =
+			tb_apple_nhi_typec_index(tunnel->tb->nhi);
+		tb_tunnel_warn(tunnel,
+			       "Apple: DP IN HPD=%d typec=%d (DPTX should use this adapter, not ATC)\n",
+			       hpd, tb_apple_dp_typec_index);
+	}
 }
 
 static void tb_dp_dump(struct tb_tunnel *tunnel)

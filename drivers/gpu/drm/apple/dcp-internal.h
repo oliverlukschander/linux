@@ -294,6 +294,7 @@ struct apple_dcp {
 	struct delayed_work typec_reconnect_wq;
 	struct delayed_work typec_fabric_retrain_wq;
 	struct delayed_work usb4_hpd_wq;
+	bool usb4_hpd_kicked;
 	u32 typec_reconnect_tries;
 
 	struct gpio_desc *hdmi_hpd;

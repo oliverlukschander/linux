@@ -66,7 +66,7 @@ MODULE_PARM_DESC(usb4_dpin,
 		 "Display crossbar mux index for USB4 DP IN (1=dpin0, 2=dpin1)");
 
 /* -1 = Type-C ATC index. 3 = HDMI DPTX PHY. 2 = Right ATC. */
-static int usb4_atc = 2;
+static int usb4_atc = 3;
 module_param_named(usb4_atc, usb4_atc, int, 0644);
 MODULE_PARM_DESC(usb4_atc,
 		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC)");
@@ -489,22 +489,12 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 		if (port->owner && port->owner->usb4_selected) {
 			struct apple_dcp *dcp = port->owner->dcp;
 
-			/*
-			 * Do not connect DPTX here: ACIO's DP tunnel is not
-			 * up yet, and dcp_dptx_connect waits 2s under this
-			 * lock. Arm reconnect so AUX/DPRX run in the tunnel
-			 * window (~1s up, ~12s teardown).
-			 */
+			/* dpin mux is up. Wait for Thunderbolt DP IN HPD. */
 			WRITE_ONCE(dcp->typec_cable_connected, true);
 			port->hpd = true;
-			dcp->typec_reconnect_tries = 0;
-			cancel_delayed_work(&dcp->typec_reconnect_wq);
-			mod_delayed_work(system_freezable_wq,
-					 &dcp->typec_reconnect_wq,
-					 DPTX_USB4_CONNECT_DELAY);
 			dev_info(dcp->dev,
-				 "USB4 DP IN armed; DPTX connect in %u ms\n",
-				 jiffies_to_msecs(DPTX_USB4_CONNECT_DELAY));
+				 "USB4 dpin mux typec%u; waiting for DP IN HPD\n",
+				 port->owner->typec_index);
 		}
 		return 0;
 	}
@@ -667,24 +657,45 @@ static int dcp_usb4_arm_typec(int typec_index)
 	return 0;
 }
 
+static void dcp_usb4_auto_arm_work(struct work_struct *work);
+static DECLARE_DELAYED_WORK(dcp_usb4_auto_arm_wq, dcp_usb4_auto_arm_work);
+
 static void dcp_usb4_auto_arm_work(struct work_struct *work)
 {
-	int i;
+	int *hpd, *idx;
+	int typec;
 
 	if (usb4_arm >= 0) {
 		dcp_usb4_arm_typec(usb4_arm);
 		return;
 	}
-	for (i = 0; i < 3; i++) {
-		if (dcp_typec_nhi_has_tb_device(i)) {
-			pr_info("appledrm: NHI typec%u has a Thunderbolt device, arming DP IN\n",
-				i);
-			dcp_usb4_arm_typec(i);
-		}
-	}
-}
 
-static DECLARE_DELAYED_WORK(dcp_usb4_auto_arm_wq, dcp_usb4_auto_arm_work);
+	hpd = __symbol_get("tb_apple_dp_in_hpd");
+	idx = __symbol_get("tb_apple_dp_typec_index");
+	if (!hpd || !idx) {
+		if (hpd)
+			__symbol_put("tb_apple_dp_in_hpd");
+		if (idx)
+			__symbol_put("tb_apple_dp_typec_index");
+		mod_delayed_work(system_freezable_wq, &dcp_usb4_auto_arm_wq,
+				 msecs_to_jiffies(500));
+		return;
+	}
+	if (*hpd && *idx >= 0) {
+		typec = *idx;
+		usb4_atc = 3;
+		pr_info("appledrm: DP IN HPD=1 typec%u, DPTX phy 3 (not ATC)\n",
+			typec);
+		__symbol_put("tb_apple_dp_in_hpd");
+		__symbol_put("tb_apple_dp_typec_index");
+		dcp_usb4_arm_typec(typec);
+		return;
+	}
+	__symbol_put("tb_apple_dp_in_hpd");
+	__symbol_put("tb_apple_dp_typec_index");
+	mod_delayed_work(system_freezable_wq, &dcp_usb4_auto_arm_wq,
+			 msecs_to_jiffies(500));
+}
 
 static struct apple_dcp_typec_port *
 dcp_typec_port_get(struct device_node *connector_np)

@@ -646,6 +646,12 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		 */
 		dev_info(service->ep->dcp->dev,
 			 "DPTXPort: INACTIVE_SINK_DETECTED (keep waiting for lanes)\n");
+		if (!service->ep->dcp->usb4_hpd_kicked) {
+			service->ep->dcp->usb4_hpd_kicked = true;
+			mod_delayed_work(system_freezable_wq,
+					 &service->ep->dcp->usb4_hpd_wq,
+					 msecs_to_jiffies(50));
+		}
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
