@@ -34,6 +34,7 @@
 #include <linux/usb/typec_mux.h>
 #include <linux/workqueue.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
@@ -1626,7 +1627,18 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	dcp->nr_modes = 1;
 	WRITE_ONCE(dcp->connector->connected, true);
 	dev_info(dcp->dev,
-		 "USB4: fake 1920x1080 scanout (no lpdptxphy); expect firmware timing mismatch\n");
+		 "USB4: fake 1920x1080 scanout (no lpdptxphy); kernel modeset\n");
+	{
+		struct drm_crtc_state fake = { };
+		int mret;
+
+		fake.mode = dm->mode;
+		if (dcp->fw_compat == DCP_FIRMWARE_V_13_5)
+			mret = iomfb_modeset_v13_3(dcp, &fake);
+		else
+			mret = iomfb_modeset_v12_3(dcp, &fake);
+		dev_info(dcp->dev, "USB4: kernel iomfb_modeset %d\n", mret);
+	}
 	schedule_work(&dcp->connector->hotplug_wq);
 	return 0;
 }
