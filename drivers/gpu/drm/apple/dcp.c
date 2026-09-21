@@ -1434,14 +1434,13 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp->connector_type, dcp->dptxport[port].connected);
 
 	if (dcp_is_usb4_output(dcp) && !usb4_force_dptx) {
-		dcp_usb4_enable_lpdptxphy(dcp);
-		dev_info(dcp->dev,
-			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up. 0073 0x9001 on unit 0 ACTIVATEs.
-		 * 0077 unit 1 DEACTIVATEd. Stay on unit 0 / CORE=1 /
-		 * ATC=0. No analog MMIO, no core+0x10.
+		 * 0078 hub-from-init blanked eDP. Instantiating
+		 * phy-apple-dptx can write lpdptxphy core+0x10. Stay on
+		 * 0x9001 unit 0 with no PHY object. No analog MMIO.
 		 */
+		dev_info(dcp->dev,
+			 "USB4: skip lpdptxphy instantiate (eDP stays on)\n");
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
 			u8 atc = (usb4_atc >= 0) ? usb4_atc : 0;
