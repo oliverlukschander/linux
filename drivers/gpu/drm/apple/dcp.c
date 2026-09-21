@@ -1618,6 +1618,8 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	}
 	dm->mode = *src;
 	drm_mode_destroy(dcp->connector->base.dev, src);
+	dm->mode.type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+	drm_mode_set_name(&dm->mode);
 	dm->color_mode_id = 1;
 	dm->timing_mode_id = 2;
 	dcp->modes = dm;
