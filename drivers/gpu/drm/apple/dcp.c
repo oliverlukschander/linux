@@ -1627,11 +1627,15 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	dcp->nr_modes = 1;
 	WRITE_ONCE(dcp->connector->connected, true);
 	dev_info(dcp->dev,
-		 "USB4: fake 1920x1080 scanout (no lpdptxphy); kernel modeset\n");
+		 "USB4: fake 1920x1080 scanout; iomfb poweron then modeset\n");
 	{
 		struct drm_crtc_state fake = { };
 		int mret;
 
+		if (dcp->fw_compat == DCP_FIRMWARE_V_13_5)
+			iomfb_poweron_v13_3(dcp);
+		else
+			iomfb_poweron_v12_3(dcp);
 		fake.mode = dm->mode;
 		if (dcp->fw_compat == DCP_FIRMWARE_V_13_5)
 			mret = iomfb_modeset_v13_3(dcp, &fake);
