@@ -60,16 +60,19 @@ static bool show_notch;
  * USB4 tunnels need a DP IN, not the ATC PHY. Default dpin0; override with
  * appledrm.usb4_dpin=2 if DPRX still fails.
  */
-static int usb4_dpin_index = 1;
+int usb4_dpin_index = 1;
 module_param_named(usb4_dpin, usb4_dpin_index, int, 0644);
 MODULE_PARM_DESC(usb4_dpin,
 		 "Display crossbar mux index for USB4 DP IN (1=dpin0, 2=dpin1)");
 
-/* -1 = Type-C ATC index. 3 = HDMI DPTX PHY. 2 = Right ATC. */
-static int usb4_atc = 3;
+/*
+ * -1 = Type-C route ATC index (Right USB-C = 2). Do not use 3: that is the
+ * HDMI analog PHY, which trains the empty HDMI jack.
+ */
+static int usb4_atc = -1;
 module_param_named(usb4_atc, usb4_atc, int, 0644);
 MODULE_PARM_DESC(usb4_atc,
-		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC)");
+		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC, 3=HDMI analog)");
 
 /* -1 = auto (arm the typecN whose NHI has a Thunderbolt device). 0..2 force. */
 static int usb4_arm = -1;
@@ -192,12 +195,15 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
-/* USB4 DP IN: prefer the pipeline with a dedicated DPTX PHY (HDMI hybrid). */
+/*
+ * USB4 DP IN: prefer the USB-C dcpext. The HDMI hybrid's dedicated DPTX PHY 3
+ * trains the empty HDMI jack even when the USB-C crossbar dpin mux is selected.
+ */
 static unsigned int dcp_typec_route_score_usb4(struct apple_dcp_typec_route *route)
 {
 	unsigned int score = dcp_typec_route_score(route);
 
-	if (!route->dcp->fixed_phy)
+	if (route->dcp->fixed_phy)
 		score += 100;
 	return score;
 }
@@ -247,15 +253,12 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 
 	dcp->phy = route->phy;
 	/*
-	 * USB4 DP IN is the DCP's own DPTX (apple,dptx-phy), routed onto
-	 * the USB4 DP IN adapter by the crossbar. The Type-C ATC index
-	 * (typec-dptx-phys) is DP alt-mode only — targeting it while the
-	 * ATC is in USB4 makes firmware report DEVICE_NOT_STARTED.
+	 * USB4 pixels leave the DCP as digital DPTX; the crossbar must
+	 * switch dpin0/dpin1 onto ACIO DP IN. Firmware remote-port ATC is
+	 * the Type-C port index. HDMI PHY 3 is the empty analog jack.
 	 */
 	if (usb4 && usb4_atc >= 0)
 		dcp->dptx_phy = usb4_atc;
-	else if (usb4)
-		dcp->dptx_phy = dcp->fixed_dptx_phy;
 	else
 		dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
@@ -282,7 +285,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	route->selected = true;
 
 	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u (%s)\n",
-		 route->dptx_phy, usb4 ? "USB4 DP IN" : "DP alt-mode");
+		 dcp->dptx_phy, usb4 ? "USB4 DP IN" : "DP alt-mode");
 	return 0;
 }
 
@@ -683,8 +686,7 @@ static void dcp_usb4_auto_arm_work(struct work_struct *work)
 	}
 	if (*hpd && *idx >= 0) {
 		typec = *idx;
-		usb4_atc = 3;
-		pr_info("appledrm: DP IN HPD=1 typec%u, DPTX phy 3 (not ATC)\n",
+		pr_info("appledrm: DP IN HPD=1 typec%u, DPTX ATC from Type-C route (not HDMI phy 3)\n",
 			typec);
 		__symbol_put("tb_apple_dp_in_hpd");
 		__symbol_put("tb_apple_dp_typec_index");
@@ -1344,8 +1346,11 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	/* USB4: drive the dedicated DPTX PHY (not the USB4 ATC). */
-	dcp->dptxport[port].atcphy = usb4 ? dcp->fixed_phy : dcp->phy;
+	/*
+	 * USB4 AUX/lanes go through ACIO DP IN, not the HDMI analog PHY or
+	 * the USB4-occupied ATC. Leave atcphy NULL so APCALLs stay logical.
+	 */
+	dcp->dptxport[port].atcphy = usb4 ? NULL : dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
@@ -1357,7 +1362,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	ret = dptxport_connect(dcp->dptxport[port].service, 0,
 			       dcp->dptx_phy, dcp->dptx_die,
-		       dcp_is_typec_output(dcp));
+		       dcp_is_typec_output(dcp) && !usb4);
 	if (ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: failed to connect DPTX target %u:%u: %d\n",
@@ -1434,49 +1439,6 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 	if (!ret) {
 		dcp->typec_reconnect_tries = 0;
 		return;
-	}
-
-	if (dcp_is_usb4_output(dcp) && dcp->typec_reconnect_tries == 1) {
-		static const unsigned int or_cycle[] = {
-			0, 0x1000, 0x2000, 0x4000, 0x200, 0x100, 0x1,
-		};
-		int n = ARRAY_SIZE(or_cycle);
-		int i, next = 0;
-
-		for (i = 0; i < n; i++) {
-			if (or_cycle[i] == usb4_target_or) {
-				next = (i + 1) % n;
-				break;
-			}
-		}
-		usb4_target_or = or_cycle[next];
-		dev_info(dcp->dev, "USB4: cycle target OR to 0x%x\n",
-			 usb4_target_or);
-	}
-
-	if (dcp_is_usb4_output(dcp) &&
-	    (dcp->typec_reconnect_tries == 0 || dcp->typec_reconnect_tries == 2) &&
-	    dcp->active_typec_route && dcp->active_typec_route->xbar &&
-	    dcp->active_typec_route->xbar->chip) {
-		struct apple_dcp_typec_route *route = dcp->active_typec_route;
-		struct mux_chip *chip = route->xbar->chip;
-		int next = (usb4_dpin_index == 1) ? 2 : 1;
-
-		if (next < (int)chip->controllers) {
-			mux_control_deselect(dcp_typec_route_mux(route));
-			route->usb4_xbar = &chip->mux[next];
-			route->usb4_xbar_borrowed = true;
-			usb4_dpin_index = next;
-			if (mux_control_select(route->usb4_xbar,
-					       route->mux_index))
-				dev_err(dcp->dev,
-					"USB4: failed to select mux %d\n",
-					next);
-			else
-				dev_info(dcp->dev,
-					 "USB4: flipped to crossbar mux %d\n",
-					 next);
-		}
 	}
 
 	if (++dcp->typec_reconnect_tries < DPTX_RECONNECT_RETRIES) {

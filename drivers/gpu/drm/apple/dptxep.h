@@ -35,6 +35,7 @@ enum dptx_apcall {
 #define DCPDPTX_REMOTE_PORT_CORE GENMASK(3, 0)
 #define DCPDPTX_REMOTE_PORT_ATC GENMASK(7, 4)
 #define DCPDPTX_REMOTE_PORT_DIE GENMASK(11, 8)
+#define DCPDPTX_REMOTE_PORT_DPIN GENMASK(13, 12)
 #define DCPDPTX_REMOTE_PORT_CONNECTED BIT(15)
 #define DCPDPTX_REMOTE_PORT_SUPPORTS_HPD BIT(8)
 
@@ -71,4 +72,5 @@ int dptxport_release_display(struct apple_epic_service *service);
 int dptxport_set_hpd(struct apple_epic_service *service, bool hpd);
 
 extern unsigned int usb4_target_or;
+extern int usb4_dpin_index;
 #endif

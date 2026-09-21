@@ -11,7 +11,7 @@
 unsigned int usb4_target_or;
 module_param(usb4_target_or, uint, 0644);
 MODULE_PARM_DESC(usb4_target_or,
-		 "OR into USB4 DPTX remote-port target (default 0x1000)");
+		 "OR into USB4 DPTX remote-port target after DPIN field");
 
 #include "afk.h"
 #include "dcp.h"
@@ -80,19 +80,31 @@ struct dptxport_apcall_set_tiled {
 	__le32 retcode;
 };
 
+static u32 dptxport_remote_target(struct apple_dcp *dcp, u8 core, u8 atc,
+				  u8 die)
+{
+	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
+		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
+		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
+		     DCPDPTX_REMOTE_PORT_CONNECTED;
+
+	if (dcp_is_usb4_output(dcp)) {
+		/* dpin0=1, dpin1=2 in bits 13:12 ({die,atc,dpin,core}). */
+		unsigned int dpin = (usb4_dpin_index == 2) ? 2 : 1;
+
+		target |= FIELD_PREP(DCPDPTX_REMOTE_PORT_DPIN, dpin);
+		target |= usb4_target_or;
+	}
+	return target;
+}
+
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 				 u8 atc, u8 die)
 {
 	struct dptx_port *dptx = service->cookie;
 	struct dcpdptx_connection_cmd cmd, resp;
 	int ret;
-	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-		     DCPDPTX_REMOTE_PORT_CONNECTED;
-
-	if (dcp_is_usb4_output(service->ep->dcp))
-		target |= usb4_target_or;
+	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 	dev_info(service->ep->dcp->dev,
@@ -121,13 +133,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 	struct dcpdptx_connection_cmd cmd, resp;
 	u32 unk_field = supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0;
 	int ret;
-	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-		     DCPDPTX_REMOTE_PORT_CONNECTED;
-
-	if (dcp_is_usb4_output(service->ep->dcp))
-		target |= usb4_target_or;
+	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
 	trace_dptxport_connect(dptx, core, atc, die);
 
@@ -335,9 +341,9 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	case 0 ... 2:
 	case 4:
 		dptx->phy_ops.dp.lanes = lane_count;
-		// Use dptx phy index > 3 as indication for dptx-phy or
-		// lpdptx-phy and configure the number of lanes for those
-		dptx->phy_ops.dp.set_lanes = (dcp->dptx_phy > 3);
+		/* USB4 DP IN has no ATC PHY; still accept the lane count. */
+		dptx->phy_ops.dp.set_lanes =
+			dcp_is_usb4_output(dcp) || (dcp->dptx_phy > 3);
 		break;
 	default:
 		dev_err(dcp->dev, "set_active_lane_count: invalid lane count:%llu\n", lane_count);
@@ -646,12 +652,6 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		 */
 		dev_info(service->ep->dcp->dev,
 			 "DPTXPort: INACTIVE_SINK_DETECTED (keep waiting for lanes)\n");
-		if (!service->ep->dcp->usb4_hpd_kicked) {
-			service->ep->dcp->usb4_hpd_kicked = true;
-			mod_delayed_work(system_freezable_wq,
-					 &service->ep->dcp->usb4_hpd_wq,
-					 msecs_to_jiffies(50));
-		}
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
