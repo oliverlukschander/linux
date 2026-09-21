@@ -817,32 +817,7 @@ static void apple_dp_dump_vse(struct tb_switch *sw)
 		tb_sw_warn(sw, "Apple VSE cap=%d:%s\n", cap, buf);
 }
 
-/* +0x0b hung NHI. +0x02 stuck as 1 in 0059 before that. Cable_info neighbor. */
-static int apple_dp_set_vse_02(struct tb_switch *sw)
-{
-	int cap, ret;
-	u32 orig = 0, val = 1;
 
-	cap = tb_switch_find_vse_cap(sw, TB_VSE_CAP_APPLE);
-	if (cap < 0)
-		return cap;
-	ret = tb_sw_read(sw, &orig, TB_CFG_SWITCH, cap + 2, 1);
-	if (ret)
-		return ret;
-	if (orig) {
-		tb_sw_warn(sw, "Apple VSE +0x02 already %08x\n", orig);
-		return 0;
-	}
-	ret = tb_sw_write(sw, &val, TB_CFG_SWITCH, cap + 2, 1);
-	if (ret) {
-		tb_sw_warn(sw, "Apple VSE +0x02 write failed %d\n", ret);
-		return ret;
-	}
-	ret = tb_sw_read(sw, &val, TB_CFG_SWITCH, cap + 2, 1);
-	tb_sw_warn(sw, "Apple VSE +0x02 wrote 1 read %08x\n",
-		   ret ? 0xffffffff : val);
-	return ret;
-}
 
 static void apple_dp_dump_analog(struct apple_cio *acio, const char *tag)
 {
@@ -1054,12 +1029,6 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	WRITE_ONCE(apple_dpin_anhi, anhi);
 
 	apple_dp_dump_rc(anhi->acio);
-	apple_dp_dump_vse(in->sw);
-	if (apple_dp_set_vse_02(in->sw)) {
-		dev_err(anhi->dev,
-			"Apple VSE +0x02 failed; skip further config-space dumps\n");
-		return 0;
-	}
 	apple_dp_dump_vse(in->sw);
 	dev_info(anhi->dev,
 		 "DP IN analog block 0x%x (port %u) dpin_aux=%d (0=hands-off)\n",
@@ -1508,13 +1477,6 @@ static int apple_cio_start(struct apple_cio *acio)
 	if (ret) {
 		dev_err(acio->dev, "M3 RTKit failed to boot: %d\n", ret);
 		goto err_free_rtkit;
-	}
-
-	for (i = 0x10; i <= 0x1f; i++) {
-		int ep_ret = apple_rtkit_start_ep(acio->rtk, i);
-
-		if (!ep_ret)
-			dev_info(acio->dev, "ACIO RTKit started ep %u\n", i);
 	}
 
 	ret = readl_poll_timeout(acio->rc_base + APPLE_CIO_M3_STAT, state,
