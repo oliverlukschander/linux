@@ -1760,6 +1760,59 @@ module_param_cb(usb4_scanout, &usb4_scanout_ops, &usb4_scanout, 0644);
 MODULE_PARM_DESC(usb4_scanout,
 		 "Write 1 to advertise 1080p on USB4 without lpdptxphy");
 
+static int usb4_pipe_set(const char *val, const struct kernel_param *kp)
+{
+	struct apple_dcp *dcp = usb4_armed_dcp;
+	struct apple_dcp_typec_route *route;
+	int v, ret, h;
+
+	ret = kstrtoint(val, 0, &v);
+	if (ret)
+		return ret;
+	if (v == 0)
+		return 0;
+	if (v != 1)
+		return -EINVAL;
+	if (!dcp)
+		return -ENODEV;
+
+	dev_info(dcp->dev,
+		 "USB4: pipe power (handle 0, no modeset, no lpdptxphy)\n");
+	switch (dcp->fw_compat) {
+	case DCP_FIRMWARE_V_12_3:
+		iomfb_poweron_pipe_v12_3(dcp);
+		break;
+	case DCP_FIRMWARE_V_13_5:
+		iomfb_poweron_pipe_v13_3(dcp);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	route = dcp->active_typec_route;
+	if (route && route->usb4_xbar) {
+		mux_control_deselect(route->usb4_xbar);
+		ret = mux_control_select(route->usb4_xbar, route->mux_index);
+		dev_info(dcp->dev, "USB4: reselect dpin after pipe power: %d\n",
+			 ret);
+	}
+	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
+		h = dptxport_set_hpd_timeout(dcp->dptxport[0].service, true,
+					     8000);
+		dev_info(dcp->dev, "USB4: set_hpd after pipe power: %d\n", h);
+	}
+	return 0;
+}
+
+static int usb4_pipe;
+static const struct kernel_param_ops usb4_pipe_ops = {
+	.set = usb4_pipe_set,
+	.get = param_get_int,
+};
+module_param_cb(usb4_pipe, &usb4_pipe_ops, &usb4_pipe, 0644);
+MODULE_PARM_DESC(usb4_pipe,
+		 "Write 1 to power the USB4 dcpext pipe with the panel sequence");
+
 static void dcp_typec_reconnect_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp =
