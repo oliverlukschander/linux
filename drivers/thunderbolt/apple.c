@@ -710,7 +710,13 @@ static void apple_dp_dump_adapter(struct tb_port *port, const char *tag)
 	u32 w[17], cs4 = 0xffffffff;
 	int i, ret;
 
-	for (i = 0; i <= 16; i++) {
+	ret = tb_port_read(port, &w[0], TB_CFG_PORT, port->cap_adap, 1);
+	if (ret || w[0] == 0xffffffff) {
+		tb_port_warn(port, "%s config space dead ret=%d (not DPRX)\n",
+			     tag, ret);
+		return;
+	}
+	for (i = 1; i <= 16; i++) {
 		ret = tb_port_read(port, &w[i], TB_CFG_PORT,
 				   port->cap_adap + i, 1);
 		if (ret)
@@ -807,40 +813,6 @@ static void apple_dp_dump_vse(struct tb_switch *sw)
 	}
 	if (n)
 		tb_sw_warn(sw, "Apple VSE cap=%d:%s\n", cap, buf);
-}
-
-static void apple_dp_probe_vse(struct tb_switch *sw)
-{
-	int cap, i, ret;
-	u32 orig, val;
-
-	cap = tb_switch_find_vse_cap(sw, TB_VSE_CAP_APPLE);
-	if (cap < 0)
-		return;
-
-	/* Words 2–11 are zero on this host. See which bits stick. */
-	for (i = 2; i <= 11; i++) {
-		ret = tb_sw_read(sw, &orig, TB_CFG_SWITCH, cap + i, 1);
-		if (ret || orig)
-			continue;
-		val = 1;
-		ret = tb_sw_write(sw, &val, TB_CFG_SWITCH, cap + i, 1);
-		if (ret) {
-			tb_sw_warn(sw, "Apple VSE +0x%02x write 1 failed %d\n",
-				   i, ret);
-			continue;
-		}
-		ret = tb_sw_read(sw, &val, TB_CFG_SWITCH, cap + i, 1);
-		tb_sw_warn(sw, "Apple VSE +0x%02x wrote 1 read %08x\n", i,
-			   ret ? 0xffffffff : val);
-		if (!ret && val == 1) {
-			/* Neighbor of cable_info: leave enable bit. */
-			if (i == 2)
-				continue;
-		}
-		val = orig;
-		tb_sw_write(sw, &val, TB_CFG_SWITCH, cap + i, 1);
-	}
 }
 
 static void apple_dp_dump_analog(struct apple_cio *acio, const char *tag)
@@ -1053,8 +1025,6 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	WRITE_ONCE(apple_dpin_anhi, anhi);
 
 	apple_dp_dump_rc(anhi->acio);
-	apple_dp_dump_vse(in->sw);
-	apple_dp_probe_vse(in->sw);
 	apple_dp_dump_vse(in->sw);
 	dev_info(anhi->dev,
 		 "DP IN analog block 0x%x (port %u) dpin_aux=%d (0=hands-off)\n",
