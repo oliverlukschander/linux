@@ -13,6 +13,7 @@
 #include <linux/jiffies.h>
 #include <linux/kconfig.h>
 #include <linux/kernel.h>
+#include <linux/kmod.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of_address.h>
@@ -255,10 +256,14 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	dcp->phy = route->phy;
 	/*
 	 * USB4: digital into the USB-C dpin mux. Do not bind HDMI PHY 3
-	 * (empty jack) or switch ATC lanes to DP. AUX is ACIO DP IN.
+	 * or ATC 2. Desktop DT uses apple,dptx-phy=4 for lpdptxphy
+	 * (phy@39c000000), the dedicated DPTX that macOS calls
+	 * AppleT602XDPTXPort(lpdptx-phy0).
 	 */
 	if (usb4 && usb4_atc >= 0)
 		dcp->dptx_phy = usb4_atc;
+	else if (usb4)
+		dcp->dptx_phy = 4;
 	else
 		dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
@@ -1317,6 +1322,40 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
 #define DPTX_RECONNECT_RETRIES 1
 
+static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
+{
+	static bool tried;
+	struct device_node *np;
+	struct platform_device *pdev;
+
+	if (tried)
+		return;
+	tried = true;
+
+	request_module("phy_apple_dptx");
+	np = of_find_compatible_node(NULL, NULL, "apple,t6020-dptx-phy");
+	if (!np) {
+		dev_info(dcp->dev, "USB4: no lpdptxphy DT node\n");
+		return;
+	}
+	pdev = of_find_device_by_node(np);
+	if (pdev) {
+		dev_info(dcp->dev, "USB4: lpdptxphy already instantiated\n");
+		put_device(&pdev->dev);
+		of_node_put(np);
+		return;
+	}
+	pdev = of_platform_device_create(np, NULL, NULL);
+	of_node_put(np);
+	if (!pdev) {
+		dev_warn(dcp->dev, "USB4: failed to instantiate lpdptxphy\n");
+		return;
+	}
+	dev_info(dcp->dev, "USB4: instantiated lpdptxphy %s\n",
+		 dev_name(&pdev->dev));
+	msleep(50);
+}
+
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	bool usb4 = false;
@@ -1332,6 +1371,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp_is_typec_output(dcp),
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
+
+	if (dcp_is_usb4_output(dcp))
+		dcp_usb4_enable_lpdptxphy(dcp);
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (!dcp->dptxport[port].enabled) {

@@ -91,9 +91,9 @@ static u32 dptxport_remote_target(struct apple_dcp *dcp, u8 core, u8 atc,
 	if (dcp_is_usb4_output(dcp)) {
 		unsigned int dpin = (usb4_dpin_index == 2) ? 2 : 1;
 
-		/* ATC 2 has no firmware object in USB4; PHY 3 is HDMI. */
+		/* atc is lpdptxphy (4). DPIN selects USB-C dpin analog. */
 		target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-			 FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, 0) |
+			 FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
 			 FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
 			 FIELD_PREP(DCPDPTX_REMOTE_PORT_DPIN, dpin) |
 			 DCPDPTX_REMOTE_PORT_CONNECTED |
