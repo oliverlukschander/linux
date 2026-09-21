@@ -139,10 +139,6 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 	int ret;
 	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
-	/* 2022 USB4 tunnel traces used unk=0x101, not 0x100. */
-	if (dcp_is_usb4_output(service->ep->dcp) && supports_hpd)
-		unk_field |= 0x1;
-
 	trace_dptxport_connect(dptx, core, atc, die);
 	dev_info(service->ep->dcp->dev,
 		 "DPTX connect target=0x%x unk=0x%x\n", target, unk_field);

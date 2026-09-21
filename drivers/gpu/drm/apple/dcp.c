@@ -1437,10 +1437,23 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		/*
 		 * 0078 hub-from-init blanked eDP. Instantiating
 		 * phy-apple-dptx can write lpdptxphy core+0x10. Stay on
-		 * 0x9001 unit 0 with no PHY object. No analog MMIO.
+		 * 0x9001 unit 0, connect unk 0x100. Enable the USB-C
+		 * ATC DP AUX block without lane switch so the CORE=1
+		 * nub has analog AUX. Do not phy_set_mode(DP) the SS
+		 * lanes (kills ACIO).
 		 */
 		dev_info(dcp->dev,
 			 "USB4: skip lpdptxphy instantiate (eDP stays on)\n");
+		if (dcp->phy) {
+			int aux;
+
+			dcp->dptxport[port].atcphy = dcp->phy;
+			aux = phy_set_mode_ext(dcp->phy, PHY_MODE_DP,
+					       dcp->index);
+			dev_info(dcp->dev,
+				 "USB4: ATC DP AUX without lane switch: %d\n",
+				 aux);
+		}
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
 			u8 atc = (usb4_atc >= 0) ? usb4_atc : 0;
