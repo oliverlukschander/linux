@@ -1429,9 +1429,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dcp->dptxport[port].usb4_lane_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	if (usb4)
-		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
-	else
+	if (!usb4)
 		dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
