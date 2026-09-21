@@ -1497,9 +1497,13 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			ret = -ETIMEDOUT;
 			goto out_disconnect;
 		}
-		dev_info(dcp->dev,
-			 "USB4: DPTX trained %u lanes, DRM hotplug suppressed\n",
-			 dcp->dptxport[port].lane_count);
+		dev_info(dcp->dev, "USB4: DPTX trained %u lanes%s\n",
+			 dcp->dptxport[port].lane_count,
+			 usb4_force_dptx ? "" : ", DRM hotplug suppressed");
+		if (!usb4_force_dptx)
+			return 0;
+		if (dcp->avep)
+			av_service_connect(dcp);
 		return 0;
 	}
 
@@ -1544,6 +1548,15 @@ static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
 	ret = kstrtoint(val, 0, &v);
 	if (ret)
 		return ret;
+	if (v == 0) {
+		usb4_force_dptx = false;
+		if (usb4_lpdptx_phy)
+			phy_set_mode_ext(usb4_lpdptx_phy, PHY_MODE_DP, 0);
+		if (usb4_armed_dcp)
+			dev_info(usb4_armed_dcp->dev,
+				 "USB4: DPTX train off, lpdptxphy DCP index 0\n");
+		return 0;
+	}
 	if (v != 1)
 		return -EINVAL;
 	if (!usb4_armed_dcp)
@@ -1551,7 +1564,7 @@ static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
 
 	usb4_force_dptx = true;
 	dev_info(usb4_armed_dcp->dev,
-		 "USB4: user DPTX train (lpdptxphy assign; blanks eDP)\n");
+		 "USB4: user DPTX train (full analog; blanks eDP)\n");
 	ret = dcp_dptx_connect(usb4_armed_dcp, 0);
 	return ret ? ret : 0;
 }
