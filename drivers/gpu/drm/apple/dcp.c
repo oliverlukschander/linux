@@ -181,6 +181,16 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
+/* USB4 DP IN: prefer the USB-C-only dcpext over the HDMI-A hybrid. */
+static unsigned int dcp_typec_route_score_usb4(struct apple_dcp_typec_route *route)
+{
+	unsigned int score = dcp_typec_route_score(route);
+
+	if (route->dcp->fixed_connector_type != DRM_MODE_CONNECTOR_USB)
+		score += 100;
+	return score;
+}
+
 static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 				    bool usb4)
 {
@@ -433,7 +443,7 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 					continue;
 				if (!dcp_typec_route_available(candidate))
 					continue;
-				score = dcp_typec_route_score(candidate);
+				score = dcp_typec_route_score_usb4(candidate);
 				if (score < best_score) {
 					best = candidate;
 					best_score = score;
@@ -598,7 +608,7 @@ static int dcp_usb4_arm_typec(int typec_index)
 				continue;
 			if (!dcp_typec_route_available(candidate))
 				continue;
-			score = dcp_typec_route_score(candidate);
+			score = dcp_typec_route_score_usb4(candidate);
 			if (score < best_score) {
 				best = candidate;
 				best_score = score;
@@ -1274,6 +1284,7 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
+	bool usb4 = false;
 	int ret = 0;
 
 	if (!dcp->phy) {
@@ -1299,6 +1310,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	dcp->dptxport[port].atcphy = dcp->phy;
+	usb4 = dcp->active_typec_route && dcp->active_typec_route->usb4_selected;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
@@ -1310,7 +1322,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	ret = dptxport_connect(dcp->dptxport[port].service, 0,
 			       dcp->dptx_phy, dcp->dptx_die,
-		       dcp_is_typec_output(dcp));
+		       usb4 ? false : dcp_is_typec_output(dcp));
 	if (ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: failed to connect DPTX target %u:%u: %d\n",
@@ -1326,7 +1338,11 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_release;
 	}
 	dcp->dptxport[port].connected = true;
-	if (dcp_is_typec_output(dcp)) {
+	/*
+	 * USB4 DP IN gets HPD from the tunneled DP OUT, not Type-C HPD.
+	 * Asserting Type-C HPD here timed out (-110) on the HDMI-hybrid DCP.
+	 */
+	if (dcp_is_typec_output(dcp) && !usb4) {
 		ret = dptxport_set_hpd(dcp->dptxport[port].service, true);
 		if (ret) {
 			dev_err(dcp->dev,
