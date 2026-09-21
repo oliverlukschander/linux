@@ -809,6 +809,40 @@ static void apple_dp_dump_vse(struct tb_switch *sw)
 		tb_sw_warn(sw, "Apple VSE cap=%d:%s\n", cap, buf);
 }
 
+static void apple_dp_probe_vse(struct tb_switch *sw)
+{
+	int cap, i, ret;
+	u32 orig, val;
+
+	cap = tb_switch_find_vse_cap(sw, TB_VSE_CAP_APPLE);
+	if (cap < 0)
+		return;
+
+	/* Words 2–11 are zero on this host. See which bits stick. */
+	for (i = 2; i <= 11; i++) {
+		ret = tb_sw_read(sw, &orig, TB_CFG_SWITCH, cap + i, 1);
+		if (ret || orig)
+			continue;
+		val = 1;
+		ret = tb_sw_write(sw, &val, TB_CFG_SWITCH, cap + i, 1);
+		if (ret) {
+			tb_sw_warn(sw, "Apple VSE +0x%02x write 1 failed %d\n",
+				   i, ret);
+			continue;
+		}
+		ret = tb_sw_read(sw, &val, TB_CFG_SWITCH, cap + i, 1);
+		tb_sw_warn(sw, "Apple VSE +0x%02x wrote 1 read %08x\n", i,
+			   ret ? 0xffffffff : val);
+		if (!ret && val == 1) {
+			/* Neighbor of cable_info: leave enable bit. */
+			if (i == 2)
+				continue;
+		}
+		val = orig;
+		tb_sw_write(sw, &val, TB_CFG_SWITCH, cap + i, 1);
+	}
+}
+
 static void apple_dp_dump_analog(struct apple_cio *acio, const char *tag)
 {
 	apple_dp_dump_rc_range(acio, APPLE_CIO_DPIN0_ANALOG,
@@ -1019,6 +1053,8 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	WRITE_ONCE(apple_dpin_anhi, anhi);
 
 	apple_dp_dump_rc(anhi->acio);
+	apple_dp_dump_vse(in->sw);
+	apple_dp_probe_vse(in->sw);
 	apple_dp_dump_vse(in->sw);
 	dev_info(anhi->dev,
 		 "DP IN analog block 0x%x (port %u) dpin_aux=%d (0=hands-off)\n",
@@ -1467,6 +1503,13 @@ static int apple_cio_start(struct apple_cio *acio)
 	if (ret) {
 		dev_err(acio->dev, "M3 RTKit failed to boot: %d\n", ret);
 		goto err_free_rtkit;
+	}
+
+	for (i = 0x10; i <= 0x1f; i++) {
+		int ep_ret = apple_rtkit_start_ep(acio->rtk, i);
+
+		if (!ep_ret)
+			dev_info(acio->dev, "ACIO RTKit started ep %u\n", i);
 	}
 
 	ret = readl_poll_timeout(acio->rc_base + APPLE_CIO_M3_STAT, state,
