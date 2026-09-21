@@ -99,6 +99,14 @@ MODULE_PARM_DESC(usb4_arm,
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 
+static struct apple_dcp *usb4_armed_dcp;
+static bool usb4_force_dptx;
+
+bool dcp_usb4_drm_allowed(void)
+{
+	return usb4_force_dptx;
+}
+
 bool hdmi_audio;
 module_param(hdmi_audio, bool, 0644);
 MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
@@ -658,6 +666,7 @@ static int dcp_usb4_arm_typec(int typec_index)
 		cancel_delayed_work(&dcp->typec_reconnect_wq);
 		mod_delayed_work(system_freezable_wq, &dcp->typec_reconnect_wq,
 				 DPTX_USB4_CONNECT_DELAY);
+		usb4_armed_dcp = dcp;
 		dev_info(dcp->dev,
 			 "USB4 DP IN armed typec%u; DPTX HPD in %u ms (no PHY connect)\n",
 			 typec_index, jiffies_to_msecs(DPTX_USB4_CONNECT_DELAY));
@@ -1412,12 +1421,14 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
 
-	if (dcp_is_usb4_output(dcp)) {
+	if (dcp_is_usb4_output(dcp) && !usb4_force_dptx) {
 		dcp_usb4_enable_lpdptxphy(dcp);
 		dev_info(dcp->dev,
-			 "USB4: skip DPTX connect (lpdptxphy DCP assign blanks eDP)\n");
+			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		return 0;
 	}
+	if (dcp_is_usb4_output(dcp))
+		dcp_usb4_enable_lpdptxphy(dcp);
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (!dcp->dptxport[port].enabled) {
@@ -1433,7 +1444,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dcp->dptxport[port].usb4_lane_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	if (!usb4)
+	if (usb4)
+		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
+	else
 		dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
@@ -1523,6 +1536,33 @@ out_unlock:
 	mutex_unlock(&dcp->hpd_mutex);
 	return ret;
 }
+
+static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
+{
+	int v, ret;
+
+	ret = kstrtoint(val, 0, &v);
+	if (ret)
+		return ret;
+	if (v != 1)
+		return -EINVAL;
+	if (!usb4_armed_dcp)
+		return -ENODEV;
+
+	usb4_force_dptx = true;
+	dev_info(usb4_armed_dcp->dev,
+		 "USB4: user DPTX train (lpdptxphy assign; blanks eDP)\n");
+	ret = dcp_dptx_connect(usb4_armed_dcp, 0);
+	return ret ? ret : 0;
+}
+
+static const struct kernel_param_ops usb4_dptx_train_ops = {
+	.set = usb4_dptx_train_set,
+	.get = param_get_bool,
+};
+module_param_cb(usb4_dptx_train, &usb4_dptx_train_ops, &usb4_force_dptx, 0644);
+MODULE_PARM_DESC(usb4_dptx_train,
+		 "Write 1 after closing the lid to train USB4 DPTX (blanks eDP)");
 
 static void dcp_typec_reconnect_work(struct work_struct *work)
 {

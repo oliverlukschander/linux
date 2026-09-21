@@ -372,9 +372,11 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	if (lane_count > 0) {
 		dev_info(dcp->dev, "USB4/DPTX: SET_ACTIVE_LANE_COUNT %llu\n",
 			 lane_count);
-		if (dcp_is_usb4_output(dcp))
+		if (dcp_is_usb4_output(dcp)) {
 			complete(&dptx->usb4_lane_completion);
-		else
+			if (dcp_usb4_drm_allowed())
+				complete(&dptx->linkcfg_completion);
+		} else
 			complete(&dptx->linkcfg_completion);
 	}
 
