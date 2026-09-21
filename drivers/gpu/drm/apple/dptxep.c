@@ -357,8 +357,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	}
 
 	if (dptx->phy_ops.dp.set_lanes) {
-		if (dptx->atcphy &&
-		    !(dcp_is_usb4_output(dcp) && dptx->atcphy == dcp->phy)) {
+		if (dptx->atcphy && !dcp_is_usb4_output(dcp)) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
@@ -473,9 +472,7 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 		dptx->phy_ops.dp.link_rate = phy_link_rate;
 		dptx->phy_ops.dp.set_rate = 1;
 
-		if (dptx->atcphy &&
-		    !(dcp_is_usb4_output(service->ep->dcp) &&
-		      dptx->atcphy == service->ep->dcp->phy)) {
+		if (dptx->atcphy && !dcp_is_usb4_output(service->ep->dcp)) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
