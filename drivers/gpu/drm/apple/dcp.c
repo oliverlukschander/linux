@@ -65,6 +65,12 @@ module_param_named(usb4_dpin, usb4_dpin_index, int, 0644);
 MODULE_PARM_DESC(usb4_dpin,
 		 "Display crossbar mux index for USB4 DP IN (1=dpin0, 2=dpin1)");
 
+/* -1 = Type-C ATC index. 3 = HDMI DPTX PHY. 2 = Right ATC. */
+static int usb4_atc = 2;
+module_param_named(usb4_atc, usb4_atc, int, 0644);
+MODULE_PARM_DESC(usb4_atc,
+		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC)");
+
 /* -1 = auto (arm the typecN whose NHI has a Thunderbolt device). 0..2 force. */
 static int usb4_arm = -1;
 static int dcp_usb4_arm_typec(int typec_index);
@@ -246,7 +252,12 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	 * (typec-dptx-phys) is DP alt-mode only — targeting it while the
 	 * ATC is in USB4 makes firmware report DEVICE_NOT_STARTED.
 	 */
-	dcp->dptx_phy = usb4 ? dcp->fixed_dptx_phy : route->dptx_phy;
+	if (usb4 && usb4_atc >= 0)
+		dcp->dptx_phy = usb4_atc;
+	else if (usb4)
+		dcp->dptx_phy = dcp->fixed_dptx_phy;
+	else
+		dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	if (route->port->connector) {
 		route->port->connector->dcp = to_platform_device(dcp->dev);
@@ -1449,6 +1460,21 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 		dcp->typec_reconnect_tries, ret);
 }
 
+static void dcp_usb4_hpd_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp =
+		container_of(to_delayed_work(work), struct apple_dcp,
+			     usb4_hpd_wq);
+	int ret;
+
+	if (!dcp->dptxport[0].service || !dcp->dptxport[0].enabled)
+		return;
+	dev_info(dcp->dev, "USB4: kick DPTX HPD after INACTIVE_SINK\n");
+	ret = dptxport_set_hpd(dcp->dptxport[0].service, true);
+	if (ret)
+		dev_warn(dcp->dev, "USB4: HPD kick failed: %d\n", ret);
+}
+
 static void disconnected_hpd_event(struct apple_connector *con)
 {
 	if (con && con->connected) {
@@ -2309,6 +2335,7 @@ static int dcp_platform_probe(struct platform_device *pdev)
 			  dcp_typec_reconnect_work);
 	INIT_DELAYED_WORK(&dcp->typec_fabric_retrain_wq,
 			  dcp_typec_retrain_work);
+	INIT_DELAYED_WORK(&dcp->usb4_hpd_wq, dcp_usb4_hpd_work);
 
 	platform_set_drvdata(pdev, dcp);
 
@@ -2454,6 +2481,7 @@ static void dcp_platform_shutdown(struct platform_device *pdev)
 		WRITE_ONCE(dcp->typec_cable_connected, false);
 		cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 		cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
+		cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
 	}
 	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 	component_del(&pdev->dev, &dcp_comp_ops);
@@ -2466,6 +2494,7 @@ static int dcp_platform_suspend(struct device *dev)
 	WRITE_ONCE(dcp->typec_cable_connected, false);
 	cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 	cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
+	cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
 	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 
 	if (dcp->avep)

@@ -293,6 +293,7 @@ struct apple_dcp {
 	bool typec_cable_connected;
 	struct delayed_work typec_reconnect_wq;
 	struct delayed_work typec_fabric_retrain_wq;
+	struct delayed_work usb4_hpd_wq;
 	u32 typec_reconnect_tries;
 
 	struct gpio_desc *hdmi_hpd;
