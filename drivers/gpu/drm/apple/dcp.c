@@ -1412,8 +1412,12 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
 
-	if (dcp_is_usb4_output(dcp))
+	if (dcp_is_usb4_output(dcp)) {
 		dcp_usb4_enable_lpdptxphy(dcp);
+		dev_info(dcp->dev,
+			 "USB4: skip DPTX connect (lpdptxphy DP mode blanks eDP)\n");
+		return 0;
+	}
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (!dcp->dptxport[port].enabled) {
@@ -1474,7 +1478,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		ret = wait_for_completion_timeout(
 			&dcp->dptxport[port].usb4_lane_completion,
 			msecs_to_jiffies(8000));
-		if (!ret && dcp->dptxport[port].lane_count == 0) {
+		if (!ret) {
 			dev_err(dcp->dev,
 				"dcp_dptx_connect: USB4 DPTX train timeout\n");
 			ret = -ETIMEDOUT;
