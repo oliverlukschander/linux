@@ -545,7 +545,7 @@ dptxport_call_activate(struct apple_epic_service *service,
 		       void *reply, size_t reply_size)
 {
 	struct dptx_port *dptx = service->cookie;
-	const struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp *dcp = service->ep->dcp;
 
 	/*
 	 * Standalone PHYs need DCP input selection. USB4 keeps ATC lanes
@@ -554,6 +554,24 @@ dptxport_call_activate(struct apple_epic_service *service,
 	if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
+
+	/*
+	 * Analog DPIN: ACTIVATE with no atcphy. 0073 left firmware waiting
+	 * after HPD=1 (no 22/24, analog 0x1017). Pulse ACIO analog now that
+	 * the nub is powered. Do not phy_set_mode lpdptxphy.
+	 */
+	if (dcp_is_usb4_output(dcp) && !dptx->atcphy) {
+		void (*analog)(void);
+
+		analog = __symbol_get("apple_usb4_dpin_on_activate");
+		if (analog) {
+			dev_info(dcp->dev, "USB4: ACTIVATE pulse ACIO analog\n");
+			analog();
+			__symbol_put("apple_usb4_dpin_on_activate");
+		} else {
+			dev_info(dcp->dev, "USB4: ACTIVATE no analog helper\n");
+		}
+	}
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)

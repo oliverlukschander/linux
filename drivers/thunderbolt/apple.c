@@ -680,6 +680,8 @@ static int apple_nhi_pci_tunnel_post_activate(struct tb_nhi *nhi)
 static int apple_dpin_aux;
 static struct apple_nhi *apple_dpin_anhi;
 
+void apple_usb4_dpin_on_activate(void);
+
 static int apple_dpin_aux_set(const char *val, const struct kernel_param *kp);
 static const struct kernel_param_ops apple_dpin_aux_ops = {
 	.set = apple_dpin_aux_set,
@@ -866,7 +868,7 @@ static void apple_dp_set_dpme(struct tb_port *in)
 		     ret ? "write failed" : "set", cs8);
 }
 
-static void apple_dp_start_analog(struct apple_nhi *anhi)
+static void apple_dp_start_analog(struct apple_nhi *anhi, bool pulse)
 {
 	struct apple_cio *acio;
 	u32 block, ctrl, hole, fsm;
@@ -882,10 +884,10 @@ static void apple_dp_start_analog(struct apple_nhi *anhi)
 	hole = readl(acio->rc_base + block + APPLE_CIO_DPIN_ANALOG_HOLE);
 	fsm = readl(acio->rc_base + block + APPLE_CIO_DPIN_ANALOG_FSM);
 	dev_info(acio->dev,
-		 "DP IN analog +0x00=%08x +0x18=%08x +0x20=%08x aux=%d\n",
-		 ctrl, fsm, hole, apple_dpin_aux);
+		 "DP IN analog +0x00=%08x +0x18=%08x +0x20=%08x pulse=%d\n",
+		 ctrl, fsm, hole, pulse);
 
-	if (apple_dpin_aux < 1)
+	if (!pulse)
 		return;
 
 	/* +0x00 readback is empty status; still pulse start like PCIe-C. */
@@ -908,6 +910,19 @@ static void apple_dp_start_analog(struct apple_nhi *anhi)
 			      "dpin analog after start", false);
 }
 
+void apple_usb4_dpin_on_activate(void)
+{
+	struct apple_nhi *anhi = READ_ONCE(apple_dpin_anhi);
+
+	if (!anhi) {
+		pr_info("thunderbolt-apple: USB4 ACTIVATE analog: no NHI\n");
+		return;
+	}
+	dev_info(anhi->dev, "USB4 ACTIVATE: pulse ACIO analog +0x00\n");
+	apple_dp_start_analog(anhi, true);
+}
+EXPORT_SYMBOL_GPL(apple_usb4_dpin_on_activate);
+
 static int apple_dpin_aux_set(const char *val, const struct kernel_param *kp)
 {
 	struct apple_nhi *anhi;
@@ -919,7 +934,7 @@ static int apple_dpin_aux_set(const char *val, const struct kernel_param *kp)
 	apple_dpin_aux = v;
 	anhi = READ_ONCE(apple_dpin_anhi);
 	if (v >= 1 && anhi)
-		apple_dp_start_analog(anhi);
+		apple_dp_start_analog(anhi, true);
 	return 0;
 }
 
@@ -1036,7 +1051,7 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	if (apple_dpin_aux >= 1) {
 		if (tb_port_is_dpin(in))
 			apple_dp_set_dpme(in);
-		apple_dp_start_analog(anhi);
+		apple_dp_start_analog(anhi, true);
 	} else {
 		dev_info(anhi->dev,
 			 "DP IN analog: leaving PHY alone until DPRX timeout\n");
