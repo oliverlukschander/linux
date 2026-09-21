@@ -88,13 +88,13 @@ static u32 dptxport_remote_target(struct apple_dcp *dcp, u8 core, u8 atc,
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
 		     DCPDPTX_REMOTE_PORT_CONNECTED;
 
-	if (dcp_is_usb4_output(dcp)) {
-		/* dpin0=1, dpin1=2 in bits 13:12 ({die,atc,dpin,core}). */
-		unsigned int dpin = (usb4_dpin_index == 2) ? 2 : 1;
-
-		target |= FIELD_PREP(DCPDPTX_REMOTE_PORT_DPIN, dpin);
+	/*
+	 * DPIN bits 13:12 made firmware look up a device that does not
+	 * exist (device == NULL). Use ATC index only; extra bits via
+	 * usb4_target_or.
+	 */
+	if (dcp_is_usb4_output(dcp))
 		target |= usb4_target_or;
-	}
 	return target;
 }
 

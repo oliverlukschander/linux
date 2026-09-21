@@ -284,6 +284,20 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	dcp->active_typec_route = route;
 	route->selected = true;
 
+	/*
+	 * Firmware looks up the DPTX device at validate/connect, before
+	 * ACTIVATE. Enable lpdptx AUX now so ATC 2 exists as a DPTX object.
+	 * phy-apple-atc does not switch USB4 lanes.
+	 */
+	if (usb4 && route->phy) {
+		ret = phy_set_mode_ext(route->phy, PHY_MODE_DP, dcp->index);
+		if (ret)
+			dev_warn(dcp->dev,
+				 "USB4: early DP AUX enable failed: %d\n", ret);
+		else
+			dev_info(dcp->dev, "USB4: DP AUX enabled before DPTX connect\n");
+	}
+
 	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u (%s)\n",
 		 dcp->dptx_phy, usb4 ? "USB4 DP IN" : "DP alt-mode");
 	return 0;
@@ -293,6 +307,9 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 {
 	struct apple_dcp *dcp = route->dcp;
 	int ret;
+
+	if (route->usb4_selected && route->phy)
+		phy_set_mode_ext(route->phy, PHY_MODE_INVALID, 0);
 
 	ret = mux_control_deselect(dcp_typec_route_mux(route));
 	if (ret)
