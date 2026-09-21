@@ -261,6 +261,15 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
+	if (!dptx->atcphy) {
+		/* USB4 DP IN: no ATC DP PHY to validate. */
+		dptx->lane_count = 4;
+		reply->retcode = cpu_to_le32(0);
+		reply->lane_count = cpu_to_le64(4);
+		dev_info(dcp->dev, "get_max_lane_count: USB4 DP IN, 4 lanes\n");
+		return 0;
+	}
+
 	ret = phy_validate(dptx->atcphy, PHY_MODE_DP, 0, &phy_ops);
 	if (ret < 0) {
 		dev_err(dcp->dev, "phy_validate failed: %d\n", ret);
@@ -553,6 +562,15 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 						   reply, reply_size);
 	case DPTX_APCALL_GET_MAX_LANE_COUNT:
 		return dptxport_call_get_max_lane_count(service, reply, reply_size);
+	case DPTX_APCALL_GET_ACTIVE_LANE_COUNT: {
+		struct dptxport_apcall_lane_count *lc = reply;
+
+		if (reply_size < sizeof(*lc))
+			return -EINVAL;
+		lc->retcode = cpu_to_le32(0);
+		lc->lane_count = cpu_to_le64(dptx->lane_count);
+		return 0;
+	}
         case DPTX_APCALL_SET_ACTIVE_LANE_COUNT:
 		return dptxport_call_set_active_lane_count(service, data, data_size,
 							   reply, reply_size);
@@ -583,9 +601,19 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 	case DPTX_APCALL_SET_DRIVE_SETTINGS:
 		return dptxport_call_set_drive_settings(service, data, data_size,
 							reply, reply_size);
-        case DPTX_APCALL_ACTIVATE:
-		return dptxport_call_activate(service, data, data_size,
-					      reply, reply_size);
+        case DPTX_APCALL_ACTIVATE: {
+		int ret = dptxport_call_activate(service, data, data_size,
+						 reply, reply_size);
+
+		if (!ret && dcp_is_usb4_output(service->ep->dcp) &&
+		    dptx->lane_count) {
+			dev_info(service->ep->dcp->dev,
+				 "USB4: complete linkcfg after ACTIVATE (lanes=%u)\n",
+				 dptx->lane_count);
+			complete(&dptx->linkcfg_completion);
+		}
+		return ret;
+	}
 	case DPTX_APCALL_DEACTIVATE:
 		return dptxport_call_deactivate(service, data, data_size,
 						reply, reply_size);

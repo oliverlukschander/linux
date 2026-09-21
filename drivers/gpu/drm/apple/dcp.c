@@ -1406,6 +1406,30 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 		return;
 	}
 
+	if (dcp_is_usb4_output(dcp) && dcp->typec_reconnect_tries == 2 &&
+	    dcp->active_typec_route && dcp->active_typec_route->xbar &&
+	    dcp->active_typec_route->xbar->chip) {
+		struct apple_dcp_typec_route *route = dcp->active_typec_route;
+		struct mux_chip *chip = route->xbar->chip;
+		int next = (usb4_dpin_index == 1) ? 2 : 1;
+
+		if (next < (int)chip->controllers) {
+			mux_control_deselect(dcp_typec_route_mux(route));
+			route->usb4_xbar = &chip->mux[next];
+			route->usb4_xbar_borrowed = true;
+			usb4_dpin_index = next;
+			if (mux_control_select(route->usb4_xbar,
+					       route->mux_index))
+				dev_err(dcp->dev,
+					"USB4: failed to select mux %d\n",
+					next);
+			else
+				dev_info(dcp->dev,
+					 "USB4: flipped to crossbar mux %d\n",
+					 next);
+		}
+	}
+
 	if (++dcp->typec_reconnect_tries < DPTX_RECONNECT_RETRIES) {
 		mod_delayed_work(system_freezable_wq, &dcp->typec_reconnect_wq,
 				 DPTX_RECONNECT_DELAY);
