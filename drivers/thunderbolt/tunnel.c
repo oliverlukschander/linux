@@ -1200,6 +1200,18 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			paths[TB_DP_VIDEO_PATH_OUT]->hops[last].next_hop_index,
 			paths[TB_DP_AUX_PATH_IN]->hops[0].in_hop_index,
 			paths[TB_DP_AUX_PATH_OUT]->hops[last].next_hop_index);
+
+		if (tb_nhi_is_apple(tunnel->tb->nhi)) {
+			const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
+
+			if (ops && ops->dp_tunnel_pre_activate) {
+				ret = ops->dp_tunnel_pre_activate(
+					tunnel->tb->nhi, tunnel->src_port,
+					tunnel->dst_port);
+				if (ret)
+					return ret;
+			}
+		}
 	} else {
 		tb_dp_dprx_stop(tunnel);
 		tb_dp_port_hpd_clear(tunnel->src_port);

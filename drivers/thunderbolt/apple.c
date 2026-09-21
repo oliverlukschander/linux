@@ -730,37 +730,51 @@ static void apple_dp_dump_rc(struct apple_cio *acio)
 
 static int apple_dp_dptx_discover(struct tb_port *in)
 {
+	static const u32 try_bits[] = {
+		BIT(0), BIT(1), BIT(8), BIT(16), BIT(24), BIT(31),
+	};
 	struct tb_switch *sw = in->sw;
-	u32 cs6 = 0, cs13 = 0, new13;
+	u32 cs0 = 0, cs6 = 0, cs9 = 0, orig9 = 0, cs13 = 0;
+	unsigned int i;
 	int ret;
 
+	tb_port_read(in, &cs0, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_0, 1);
 	ret = tb_sw_read(sw, &cs6, TB_CFG_SWITCH, ROUTER_CS_6, 1);
 	if (ret)
 		tb_port_warn(in, "ROUTER_CS_6 read failed: %d\n", ret);
 	else
-		tb_port_warn(in, "ROUTER_CS_6=%08x (DPTX discovery support in USB4 2.0)\n",
-			     cs6);
+		tb_port_warn(in, "ROUTER_CS_6=%08x AE=%u VE=%u (discover before AE)\n",
+			     cs6, !!(cs0 & ADP_DP_CS_0_AE),
+			     !!(cs0 & ADP_DP_CS_0_VE));
 
-	ret = tb_port_read(in, &cs13, TB_CFG_PORT,
-			   in->cap_adap + ADP_DP_CS_13, 1);
+	ret = tb_port_read(in, &orig9, TB_CFG_PORT,
+			   in->cap_adap + ADP_DP_CS_9, 1);
 	if (ret)
 		return ret;
 
-	new13 = cs13 | ADP_DP_CS_13_DPTX_DISCOVERY_MODE;
-	if (new13 == cs13) {
-		tb_port_warn(in, "DPTX discovery already on CS13=%08x\n", cs13);
-		return 0;
+	for (i = 0; i < ARRAY_SIZE(try_bits); i++) {
+		cs13 = try_bits[i];
+		ret = tb_port_write(in, &cs13, TB_CFG_PORT,
+				    in->cap_adap + ADP_DP_CS_13, 1);
+		if (ret) {
+			tb_port_warn(in, "DPTX discovery CS13=%08x write failed: %d\n",
+				     cs13, ret);
+			continue;
+		}
+		fsleep(100000);
+		tb_port_read(in, &cs9, TB_CFG_PORT,
+			     in->cap_adap + ADP_DP_CS_9, 1);
+		tb_port_read(in, &cs13, TB_CFG_PORT,
+			     in->cap_adap + ADP_DP_CS_13, 1);
+		tb_port_warn(in,
+			     "DPTX discovery try CS13=%08x stuck=%08x CS9 %08x -> %08x\n",
+			     try_bits[i], cs13, orig9, cs9);
+		if (cs9 != orig9)
+			return 0;
 	}
 
-	ret = tb_port_write(in, &new13, TB_CFG_PORT,
-			    in->cap_adap + ADP_DP_CS_13, 1);
-	if (ret) {
-		tb_port_warn(in, "DPTX discovery CS13 write failed: %d (was %08x)\n",
-			     ret, cs13);
-		return ret;
-	}
-
-	tb_port_warn(in, "DPTX discovery mode CS13 %08x -> %08x\n", cs13, new13);
+	cs13 = ADP_DP_CS_13_DPTX_DISCOVERY_MODE;
+	tb_port_write(in, &cs13, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_13, 1);
 	return 0;
 }
 
@@ -817,6 +831,15 @@ out_unlock:
 	mutex_unlock(&anhi->tb->lock);
 }
 
+static int apple_nhi_dp_tunnel_pre_activate(struct tb_nhi *nhi,
+					    struct tb_port *in,
+					    struct tb_port *out)
+{
+	if (tb_port_is_dpin(in))
+		return apple_dp_dptx_discover(in);
+	return 0;
+}
+
 static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 					     struct tb_port *in,
 					     struct tb_port *out)
@@ -841,7 +864,6 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	if (tb_port_is_dpin(in)) {
 		apple_dp_dump_hop(in, 8);
 		apple_dp_dump_hop(in, 9);
-		apple_dp_dptx_discover(in);
 	}
 	if (out && tb_port_is_dpout(out))
 		apple_dp_dump_adapter(out, "hub DP OUT");
@@ -880,6 +902,7 @@ static const struct tb_nhi_ops apple_nhi_ops = {
 	.pci_tunnel_pre_activate = apple_nhi_pci_tunnel_pre_activate,
 	.pci_tunnel_post_activate = apple_nhi_pci_tunnel_post_activate,
 	.pci_tunnel_deactivate = apple_nhi_pci_tunnel_deactivate,
+	.dp_tunnel_pre_activate = apple_nhi_dp_tunnel_pre_activate,
 	.dp_tunnel_post_activate = apple_nhi_dp_tunnel_post_activate,
 	.dp_tunnel_deactivate = apple_nhi_dp_tunnel_deactivate,
 };
