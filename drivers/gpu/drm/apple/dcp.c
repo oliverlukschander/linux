@@ -1426,9 +1426,12 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+	reinit_completion(&dcp->dptxport[port].usb4_lane_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	if (!usb4)
+	if (usb4)
+		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
+	else
 		dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
@@ -1469,9 +1472,24 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	}
 
 	mutex_unlock(&dcp->hpd_mutex);
+	if (usb4) {
+		ret = wait_for_completion_timeout(
+			&dcp->dptxport[port].usb4_lane_completion,
+			msecs_to_jiffies(8000));
+		if (!ret && dcp->dptxport[port].lane_count == 0) {
+			dev_err(dcp->dev,
+				"dcp_dptx_connect: USB4 DPTX train timeout\n");
+			ret = -ETIMEDOUT;
+			goto out_disconnect;
+		}
+		dev_info(dcp->dev,
+			 "USB4: DPTX trained %u lanes, DRM hotplug suppressed\n",
+			 dcp->dptxport[port].lane_count);
+		return 0;
+	}
+
 	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
-				    usb4 ? msecs_to_jiffies(8000) :
-					   DPTX_CONNECT_TIMEOUT);
+					  DPTX_CONNECT_TIMEOUT);
 	if (!ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: timed out waiting for port %u link configuration\n",

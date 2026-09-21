@@ -1025,6 +1025,16 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 	 */
 	if (dcp->main_display)
 		return;
+	/*
+	 * USB4 DPTX training cloned 3456x2234@120 onto dcpext and blanked
+	 * eDP. Keep the DRM connector disconnected until sink EDID is real.
+	 */
+	if (dcp_is_usb4_output(dcp)) {
+		dev_info(dcp->dev,
+			 "cb_hotplug() ignored on USB4 connected:%llu\n",
+			 *connected);
+		return;
+	}
 
 	if (dcp->during_modeset) {
 		/*
