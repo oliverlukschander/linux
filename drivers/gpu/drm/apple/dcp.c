@@ -1804,6 +1804,59 @@ static int usb4_pipe_set(const char *val, const struct kernel_param *kp)
 	return 0;
 }
 
+static int usb4_dptx_set(const char *val, const struct kernel_param *kp)
+{
+	struct apple_dcp *dcp = usb4_armed_dcp;
+	struct apple_dcp_typec_route *route;
+	int v, ret, h;
+
+	ret = kstrtoint(val, 0, &v);
+	if (ret)
+		return ret;
+	if (v == 0)
+		return 0;
+	if (v != 1)
+		return -EINVAL;
+	if (!dcp)
+		return -ENODEV;
+
+	route = dcp->active_typec_route;
+	if (!route || !route->phy)
+		return -ENODEV;
+
+	/*
+	 * The USB4 DP tunnel is already up. This is the transmitter:
+	 * DP pixel clocks in the ATC PHY, SS lanes left in USB4, then
+	 * HPD so DCPDPDevice starts against that clock. Not lpdptxphy.
+	 */
+	dcp->dptxport[0].atcphy = route->phy;
+	dev_info(dcp->dev, "USB4: fire DPTX clocks on typec%u\n",
+		 route->typec_index);
+	ret = phy_set_mode_ext(route->phy, PHY_MODE_DP, dcp->index);
+	dev_info(dcp->dev, "USB4: DPTX clock phy_set_mode %d\n", ret);
+	if (route->usb4_xbar) {
+		mux_control_deselect(route->usb4_xbar);
+		ret = mux_control_select(route->usb4_xbar, route->mux_index);
+		dev_info(dcp->dev, "USB4: reselect dpin after DPTX clock: %d\n",
+			 ret);
+	}
+	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
+		h = dptxport_set_hpd_timeout(dcp->dptxport[0].service, true,
+					     8000);
+		dev_info(dcp->dev, "USB4: set_hpd after DPTX clock: %d\n", h);
+	}
+	return 0;
+}
+
+static int usb4_dptx;
+static const struct kernel_param_ops usb4_dptx_ops = {
+	.set = usb4_dptx_set,
+	.get = param_get_int,
+};
+module_param_cb(usb4_dptx, &usb4_dptx_ops, &usb4_dptx, 0644);
+MODULE_PARM_DESC(usb4_dptx,
+		 "Write 1 to turn on the USB4 DPTX clocks without switching lanes");
+
 static int usb4_pipe;
 static const struct kernel_param_ops usb4_pipe_ops = {
 	.set = usb4_pipe_set,
