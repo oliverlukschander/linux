@@ -1221,6 +1221,25 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 	if (active && tb_nhi_is_apple(tunnel->tb->nhi))
 		tb_dp_dump_apple(tunnel);
 
+	if (active) {
+		const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
+
+		if (ops && ops->dp_tunnel_post_activate) {
+			ret = ops->dp_tunnel_post_activate(tunnel->tb->nhi,
+							   tunnel->src_port,
+							   tunnel->dst_port);
+			if (ret)
+				return ret;
+		}
+	} else {
+		const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
+
+		if (ops && ops->dp_tunnel_deactivate)
+			ops->dp_tunnel_deactivate(tunnel->tb->nhi,
+						  tunnel->src_port,
+						  tunnel->dst_port);
+	}
+
 	return active ? tb_dp_dprx_start(tunnel) : 0;
 }
 

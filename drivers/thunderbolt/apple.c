@@ -19,7 +19,7 @@
  * +--------+-----------+  |             |      Host      |             |
  *          |              |             |    Interface   |             |
  *          |              +---------+   +----------------+   +---------+     +--------+
- *          |   +--------->| DP IN   |                        | PCIE DN |<--->| APCIEC |
+ *          |   +--------->| DP IN   | analog/AUX serializer  | PCIE DN |<--->| APCIEC |
  *          v   |          | Adapter |   +----------------+   | Adapter |     +--------+
  *    +---------+-+        +---------+   |                |   +---------+
  *    | Display   |        |             |  IOMMU / DART  |             |
@@ -59,6 +59,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/string.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -241,6 +242,14 @@ struct apple_nhi {
 	const char **tx_irq_names;
 	const char **rx_irq_names;
 	size_t n_rings;
+
+	/* DP IN analog/AUX: poll adapter CS after the tunnel is up. */
+	struct delayed_work dp_aux_work;
+	u8 dp_in_port;
+	u8 dp_out_port;
+	u32 dp_in_cs[9];
+	bool dp_aux_armed;
+	unsigned int dp_aux_polls;
 };
 
 #define nhi_to_anhi(nhi_) container_of((nhi_), struct apple_nhi, nhi)
@@ -633,6 +642,193 @@ static int apple_nhi_pci_tunnel_post_activate(struct tb_nhi *nhi)
 	return 0;
 }
 
+#define APPLE_DP_AUX_POLL_MS		500
+#define APPLE_DP_AUX_POLL_MAX		40
+
+static void apple_dp_dump_hop(struct tb_port *port, unsigned int hopid)
+{
+	struct tb_regs_hop hop;
+	int ret;
+
+	ret = tb_port_read(port, &hop, TB_CFG_HOPS, 2 * hopid, 2);
+	if (ret) {
+		tb_port_warn(port, "DP IN hop %u read failed: %d\n", hopid, ret);
+		return;
+	}
+	tb_port_warn(port,
+		     "DP IN hop %u enable=%u out=%u next=%u credits=%u\n",
+		     hopid, hop.enable, hop.out_port, hop.next_hop,
+		     hop.initial_credits);
+}
+
+static void apple_dp_dump_adapter(struct tb_port *port, const char *tag)
+{
+	u32 w[17], cs4 = 0xffffffff;
+	int i, ret;
+
+	for (i = 0; i <= 16; i++) {
+		ret = tb_port_read(port, &w[i], TB_CFG_PORT,
+				   port->cap_adap + i, 1);
+		if (ret)
+			w[i] = 0xffffffff;
+	}
+	tb_port_read(port, &cs4, TB_CFG_PORT, ADP_CS_4, 1);
+	tb_port_warn(port,
+		     "%s type=%06x cap=%d CS0=%08x CS1=%08x CS2=%08x CS3=%08x LOCAL=%08x REMOTE=%08x STAT=%08x COMMON=%08x CS8=%08x CS9=%08x CS10=%08x ADP_CS4=%08x VE=%u AE=%u HPD=%u DPRX=%u LCK=%u\n",
+		     tag, port->config.type, port->cap_adap,
+		     w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8],
+		     w[9], w[10], cs4,
+		     !!(w[0] & ADP_DP_CS_0_VE), !!(w[0] & ADP_DP_CS_0_AE),
+		     !!(w[2] & ADP_DP_CS_2_HPD),
+		     !!(w[7] & DP_COMMON_CAP_DPRX_DONE),
+		     !!(cs4 & ADP_CS_4_LCK));
+}
+
+static void apple_dp_dump_host_adapters(struct apple_nhi *anhi)
+{
+	struct tb_port *port;
+
+	if (!anhi->tb || !anhi->tb->root_switch)
+		return;
+
+	tb_switch_for_each_port(anhi->tb->root_switch, port) {
+		if (tb_port_is_dpin(port))
+			apple_dp_dump_adapter(port, "host DP IN");
+		else if (tb_port_is_dpout(port))
+			apple_dp_dump_adapter(port, "host DP OUT");
+	}
+}
+
+static void apple_dp_dump_rc(struct apple_cio *acio)
+{
+	char buf[320];
+	int n = 0;
+	u32 off;
+
+	if (!acio->rc_base)
+		return;
+
+	for (off = 0; off < 0x100; off += 4) {
+		u32 val = readl(acio->rc_base + off);
+
+		if (!val)
+			continue;
+		n += scnprintf(buf + n, sizeof(buf) - n, " %03x=%08x", off, val);
+		if (n >= (int)sizeof(buf) - 20) {
+			dev_info(acio->dev, "ACIO RC:%s\n", buf);
+			n = 0;
+			buf[0] = '\0';
+		}
+	}
+	if (n)
+		dev_info(acio->dev, "ACIO RC:%s\n", buf);
+}
+
+static void apple_dp_aux_work(struct work_struct *work)
+{
+	struct apple_nhi *anhi =
+		container_of(to_delayed_work(work), struct apple_nhi,
+			     dp_aux_work);
+	struct tb_port *port;
+	u32 cs[9];
+	int i, ret;
+	bool changed = false, dprx = false;
+
+	if (!anhi->tb)
+		return;
+
+	mutex_lock(&anhi->tb->lock);
+	if (!anhi->dp_aux_armed || !anhi->tb->root_switch)
+		goto out_unlock;
+
+	port = &anhi->tb->root_switch->ports[anhi->dp_in_port];
+	if (!tb_port_is_dpin(port))
+		goto out_unlock;
+
+	for (i = 0; i <= 8; i++) {
+		ret = tb_port_read(port, &cs[i], TB_CFG_PORT,
+				   port->cap_adap + i, 1);
+		if (ret)
+			cs[i] = 0xffffffff;
+		if (cs[i] != anhi->dp_in_cs[i])
+			changed = true;
+	}
+	if (changed) {
+		memcpy(anhi->dp_in_cs, cs, sizeof(cs));
+		tb_port_warn(port,
+			     "DP IN CS changed CS0=%08x CS2=%08x LOCAL=%08x REMOTE=%08x COMMON=%08x VE=%u AE=%u HPD=%u DPRX=%u\n",
+			     cs[0], cs[2], cs[4], cs[5], cs[7],
+			     !!(cs[0] & ADP_DP_CS_0_VE),
+			     !!(cs[0] & ADP_DP_CS_0_AE),
+			     !!(cs[2] & ADP_DP_CS_2_HPD),
+			     !!(cs[7] & DP_COMMON_CAP_DPRX_DONE));
+	}
+	dprx = !!(cs[7] & DP_COMMON_CAP_DPRX_DONE);
+	if (dprx)
+		tb_port_warn(port, "DP IN DPRX_DONE=1 (ACIO AUX completed)\n");
+
+	anhi->dp_aux_polls++;
+	if (!dprx && anhi->dp_aux_polls < APPLE_DP_AUX_POLL_MAX)
+		mod_delayed_work(system_wq, &anhi->dp_aux_work,
+				 msecs_to_jiffies(APPLE_DP_AUX_POLL_MS));
+
+out_unlock:
+	mutex_unlock(&anhi->tb->lock);
+}
+
+static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
+					     struct tb_port *in,
+					     struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	int i;
+
+	/*
+	 * PCIe-C pulses Intr2AXI after the adapters are enabled. DP IN
+	 * analog/AUX is the same boundary: VE/AE/HPD are already 1, and
+	 * the display crossbar has selected dpin. DPRX_DONE stays 0
+	 * until this serializer talks AUX/DPCD into the host adapter.
+	 */
+	dev_info(anhi->dev,
+		 "DP IN analog/AUX serializer: tunnel %u:%u <-> %u:%u\n",
+		 in->sw->config.depth, in->port,
+		 out ? out->sw->config.depth : 0,
+		 out ? out->port : 0);
+
+	apple_dp_dump_rc(anhi->acio);
+	apple_dp_dump_host_adapters(anhi);
+	if (tb_port_is_dpin(in)) {
+		apple_dp_dump_hop(in, 8);
+		apple_dp_dump_hop(in, 9);
+	}
+	if (out && tb_port_is_dpout(out))
+		apple_dp_dump_adapter(out, "hub DP OUT");
+
+	anhi->dp_in_port = in->port;
+	anhi->dp_out_port = out ? out->port : 0;
+	anhi->dp_aux_polls = 0;
+	anhi->dp_aux_armed = true;
+	for (i = 0; i <= 8; i++) {
+		if (tb_port_read(in, &anhi->dp_in_cs[i], TB_CFG_PORT,
+				 in->cap_adap + i, 1))
+			anhi->dp_in_cs[i] = 0xffffffff;
+	}
+	mod_delayed_work(system_wq, &anhi->dp_aux_work,
+			 msecs_to_jiffies(APPLE_DP_AUX_POLL_MS));
+	return 0;
+}
+
+static void apple_nhi_dp_tunnel_deactivate(struct tb_nhi *nhi,
+					   struct tb_port *in,
+					   struct tb_port *out)
+{
+	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+
+	anhi->dp_aux_armed = false;
+	cancel_delayed_work(&anhi->dp_aux_work);
+	dev_info(anhi->dev, "DP IN analog/AUX serializer: tunnel down\n");
+}
+
 static const struct tb_nhi_ops apple_nhi_ops = {
 	.request_ring_irq = apple_nhi_request_irq,
 	.release_ring_irq = apple_nhi_release_irq,
@@ -642,6 +838,8 @@ static const struct tb_nhi_ops apple_nhi_ops = {
 	.pci_tunnel_pre_activate = apple_nhi_pci_tunnel_pre_activate,
 	.pci_tunnel_post_activate = apple_nhi_pci_tunnel_post_activate,
 	.pci_tunnel_deactivate = apple_nhi_pci_tunnel_deactivate,
+	.dp_tunnel_post_activate = apple_nhi_dp_tunnel_post_activate,
+	.dp_tunnel_deactivate = apple_nhi_dp_tunnel_deactivate,
 };
 
 static const struct tb_nhi_ring_layout apple_nhi_ring_layout = {
@@ -675,6 +873,7 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	anhi->dev = &pdev->dev;
 	anhi->np = pdev->dev.of_node;
 	anhi->acio = acio;
+	INIT_DELAYED_WORK(&anhi->dp_aux_work, apple_dp_aux_work);
 	platform_set_drvdata(pdev, anhi);
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "nhi");
@@ -805,6 +1004,8 @@ static void apple_nhi_remove(struct platform_device *pdev)
 {
 	struct apple_nhi *anhi = platform_get_drvdata(pdev);
 
+	anhi->dp_aux_armed = false;
+	cancel_delayed_work_sync(&anhi->dp_aux_work);
 	WRITE_ONCE(anhi->acio->nhi_pdev, NULL);
 	tb_domain_remove(anhi->tb);
 	wait_for_completion(&anhi->nhi.domain_released);
