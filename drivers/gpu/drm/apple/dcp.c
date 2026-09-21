@@ -1484,6 +1484,24 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 					dev_info(dcp->dev,
 						 "USB4: analog DPIN request_display core=%u atc=%u: %d\n",
 						 core, atc, r);
+					/*
+					 * request_display resets DCP pmgr 0x25.
+					 * Re-apply dpin (including dispext enable)
+					 * after that reset.
+					 */
+					if (!r && dcp->active_typec_route &&
+					    dcp->active_typec_route->usb4_xbar) {
+						struct apple_dcp_typec_route *route =
+							dcp->active_typec_route;
+						int m;
+
+						mux_control_deselect(route->usb4_xbar);
+						m = mux_control_select(route->usb4_xbar,
+								       route->mux_index);
+						dev_info(dcp->dev,
+							 "USB4: reselect dpin after nub: %d\n",
+							 m);
+					}
 				}
 				break;
 			}
