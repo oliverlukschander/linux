@@ -1438,10 +1438,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up. 0076 0x9041 (ATC=4) DEACTIVATEd.
-		 * 0073 0x9001 ACTIVATEd. Bind the second RemotePort
-		 * (unit 1 / channel 3) with CORE=1 ATC=0. usb4_atc=4
-		 * retries 0076. No analog MMIO, no core+0x10.
+		 * Analog PHY is up. 0073 0x9001 on unit 0 ACTIVATEs.
+		 * 0077 unit 1 DEACTIVATEd. Stay on unit 0 / CORE=1 /
+		 * ATC=0. No analog MMIO, no core+0x10.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
@@ -1450,9 +1449,6 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL,
 			    r = -EINVAL;
 
-			if (dcp->dptxport[1].enabled &&
-			    dcp->dptxport[1].service)
-				bind = 1;
 			cores[n++] = (usb4_core == 2) ? 2 : 1;
 			cores[n++] = (cores[0] == 1) ? 2 : 1;
 			dev_info(dcp->dev,
