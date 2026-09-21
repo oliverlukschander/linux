@@ -41,10 +41,29 @@ static void system_log_work(struct work_struct *work_)
 	kfree(work);
 }
 
+int dcp_usb4_verbose_logs(struct apple_dcp *dcp)
+{
+	u32 retcode = 0;
+	int ret;
+
+	if (!dcp || !dcp->system_service)
+		return -ENODEV;
+	ret = afk_send_command(dcp->system_service, SYSTEM_SET_PROPERTY,
+			       setprop_gAFKConfigLogMask_ffff,
+			       sizeof(setprop_gAFKConfigLogMask_ffff), NULL,
+			       sizeof(setprop_gAFKConfigLogMask_ffff),
+			       &retcode);
+	dev_info(dcp->dev, "USB4: DCP verbose logs ret=%d retcode=%u\n", ret,
+		 retcode);
+	return ret;
+}
+
 static void system_init(struct apple_epic_service *service, const char *name,
 			const char *class, s64 unit)
 {
 	struct systemep_work *work;
+
+	service->ep->dcp->system_service = service;
 
 	if (!enable_verbose_logging)
 		return;

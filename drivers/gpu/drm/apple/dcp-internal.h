@@ -267,6 +267,7 @@ struct apple_dcp {
 
 	struct apple_dcp_afkep *systemep;
 	struct completion systemep_done;
+	struct apple_epic_service *system_service;
 
 	struct apple_dcp_afkep *ibootep;
 	struct apple_dcp_afkep *dcpavservep;
