@@ -1603,6 +1603,15 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	ret = kstrtoint(val, 0, &v);
 	if (ret)
 		return ret;
+	if (v == 0) {
+		if (dcp && dcp->connector) {
+			WRITE_ONCE(dcp->connector->connected, false);
+			dcp->nr_modes = 0;
+			schedule_work(&dcp->connector->hotplug_wq);
+			dev_info(dcp->dev, "USB4: drop fake 1080p connector\n");
+		}
+		return 0;
+	}
 	if (v != 1)
 		return -EINVAL;
 	if (!dcp || !dcp->connector)
@@ -1627,12 +1636,7 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	dcp->nr_modes = 1;
 	WRITE_ONCE(dcp->connector->connected, true);
 	dev_info(dcp->dev,
-		 "USB4: fake 1920x1080; request_display then modeset (no lpdptxphy)\n");
-	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
-		int r = dptxport_request_display(dcp->dptxport[0].service);
-
-		dev_info(dcp->dev, "USB4: request_display %d (no PHY assign)\n", r);
-	}
+		 "USB4: fake 1920x1080 scanout (no request_display; 22/24 on 0:4)\n");
 	{
 		struct drm_crtc_state fake = { };
 		int mret;
