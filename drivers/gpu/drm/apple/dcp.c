@@ -186,12 +186,12 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
-/* USB4 DP IN: prefer the USB-C-only dcpext over the HDMI-A hybrid. */
+/* USB4 DP IN: prefer the pipeline with a dedicated DPTX PHY (HDMI hybrid). */
 static unsigned int dcp_typec_route_score_usb4(struct apple_dcp_typec_route *route)
 {
 	unsigned int score = dcp_typec_route_score(route);
 
-	if (route->dcp->fixed_connector_type != DRM_MODE_CONNECTOR_USB)
+	if (!route->dcp->fixed_phy)
 		score += 100;
 	return score;
 }
@@ -1321,8 +1321,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	usb4 = dcp_is_usb4_output(dcp);
-	/* USB4: ATC PHY is the USB4 router, not a DP PHY. Leave it alone. */
-	dcp->dptxport[port].atcphy = usb4 ? NULL : dcp->phy;
+	/* USB4: drive the dedicated DPTX PHY (not the USB4 ATC). */
+	dcp->dptxport[port].atcphy = usb4 ? dcp->fixed_phy : dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {

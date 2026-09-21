@@ -509,8 +509,9 @@ dptxport_call_activate(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
 
-	/* Standalone PHYs need DCP input selection here. Type-C owns ATC PHY mode. */
-	if (!dcp->phy_managed_by_typec)
+	/* Standalone PHYs need DCP input selection. USB4 uses the DPTX PHY. */
+	if (dptx->atcphy &&
+	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 
 	memcpy(reply, data, min(reply_size, data_size));
@@ -528,7 +529,8 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
 
-	if (!dcp->phy_managed_by_typec)
+	if (dptx->atcphy &&
+	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
 
 	memcpy(reply, data, min(reply_size, data_size));
