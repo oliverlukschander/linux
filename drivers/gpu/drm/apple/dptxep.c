@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 
 /* Extra bits OR'd into DPTX remote-port target for USB4 (bit 12 = guess for DPIN). */
 unsigned int usb4_target_or;
@@ -169,7 +170,8 @@ int dptxport_release_display(struct apple_epic_service *service)
 	return afk_service_call(service, 0, 7, NULL, 0, 16, NULL, 0, 16);
 }
 
-int dptxport_set_hpd(struct apple_epic_service *service, bool hpd)
+int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
+			     unsigned int timeout_ms)
 {
 	struct dcpdptx_hotplug_cmd cmd, resp;
 	int ret;
@@ -179,13 +181,18 @@ int dptxport_set_hpd(struct apple_epic_service *service, bool hpd)
 	if (hpd)
 		cmd.unk = cpu_to_le32(1);
 
-	ret = afk_service_call(service, 8, 8, &cmd, sizeof(cmd), 12, &resp,
-			       sizeof(resp), 12);
+	ret = afk_service_call_timeout(service, 8, 8, &cmd, sizeof(cmd), 12,
+				       &resp, sizeof(resp), 12, timeout_ms);
 	if (ret)
 		return ret;
 	if (le32_to_cpu(resp.unk) != hpd)
 		return -EINVAL;
 	return 0;
+}
+
+int dptxport_set_hpd(struct apple_epic_service *service, bool hpd)
+{
+	return dptxport_set_hpd_timeout(service, hpd, MSEC_PER_SEC);
 }
 
 static int

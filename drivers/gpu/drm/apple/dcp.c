@@ -1493,7 +1493,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 					    dcp->active_typec_route->usb4_xbar) {
 						struct apple_dcp_typec_route *route =
 							dcp->active_typec_route;
-						int m, aux, h2;
+						int m, h2;
 
 						mux_control_deselect(route->usb4_xbar);
 						m = mux_control_select(route->usb4_xbar,
@@ -1502,29 +1502,20 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 							 "USB4: reselect dpin after nub: %d\n",
 							 m);
 						/*
-						 * A second set_hpd, once the nub
-						 * is powered, is what makes
-						 * firmware init DCPDPDevice and
-						 * attach it to DPTXController.
-						 * 0074 did that with no AUX and
-						 * the device start timed out
-						 * (22/24). Enable USB-C ATC AUX
-						 * (no lane switch) first so the
-						 * device has a PHY to start.
+						 * Second set_hpd starts
+						 * DCPDPDevice. 0084 armed ATC
+						 * AUX and aborted this call
+						 * at 1s; firmware's start
+						 * timer is 5s and then 22/24.
+						 * No ATC AUX (that dropped
+						 * analog 0x1017 to 0x17).
+						 * Hold the call for 8s.
 						 */
-						if (dcp->phy) {
-							dcp->dptxport[bind].atcphy =
-								dcp->phy;
-							aux = phy_set_mode_ext(
-								dcp->phy, PHY_MODE_DP,
-								dcp->index);
-							dev_info(dcp->dev,
-								 "USB4: ATC AUX before DCPDPDevice: %d\n",
-								 aux);
-						}
-						h2 = dptxport_set_hpd(svc, true);
+						h2 = dptxport_set_hpd_timeout(svc,
+									      true,
+									      8000);
 						dev_info(dcp->dev,
-							 "USB4: set_hpd after nub (DCPDPDevice): %d\n",
+							 "USB4: set_hpd after nub 8s (DCPDPDevice): %d\n",
 							 h2);
 					}
 				}

@@ -888,6 +888,16 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
 		     const void *payload, size_t payload_len, void *output,
 		     size_t output_len, u32 *retcode)
 {
+	return afk_send_command_timeout(service, type, payload, payload_len,
+					output, output_len, retcode,
+					MSEC_PER_SEC);
+}
+
+int afk_send_command_timeout(struct apple_epic_service *service, u8 type,
+			     const void *payload, size_t payload_len,
+			     void *output, size_t output_len, u32 *retcode,
+			     unsigned int timeout_ms)
+{
 	struct epic_cmd cmd;
 	void *rxbuf, *txbuf;
 	dma_addr_t rxbuf_dma, txbuf_dma;
@@ -949,7 +959,7 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
 		goto err_free_cmd;
 
 	ret = wait_for_completion_timeout(&completion,
-					  msecs_to_jiffies(MSEC_PER_SEC));
+					  msecs_to_jiffies(timeout_ms));
 
 	if (ret <= 0) {
 		spin_lock_irqsave(&service->lock, flags);
@@ -988,6 +998,16 @@ int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
 		     const void *data, size_t data_len, size_t data_pad,
 		     void *output, size_t output_len, size_t output_pad)
 {
+	return afk_service_call_timeout(service, group, command, data, data_len,
+					data_pad, output, output_len,
+					output_pad, MSEC_PER_SEC);
+}
+
+int afk_service_call_timeout(struct apple_epic_service *service, u16 group,
+			     u32 command, const void *data, size_t data_len,
+			     size_t data_pad, void *output, size_t output_len,
+			     size_t output_pad, unsigned int timeout_ms)
+{
 	struct epic_service_call *call;
 	void *bfr;
 	size_t bfr_len = max(data_len + data_pad, output_len + output_pad) +
@@ -1010,8 +1030,9 @@ int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
 
 	memcpy(bfr + sizeof(*call), data, data_len);
 
-	ret = afk_send_command(service, EPIC_SUBTYPE_STD_SERVICE, bfr, bfr_len,
-			       bfr, bfr_len, &retcode);
+	ret = afk_send_command_timeout(service, EPIC_SUBTYPE_STD_SERVICE, bfr,
+				       bfr_len, bfr, bfr_len, &retcode,
+				       timeout_ms);
 	if (ret)
 		goto out;
 	if (retcode) {
