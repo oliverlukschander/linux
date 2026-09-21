@@ -603,19 +603,9 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 	case DPTX_APCALL_SET_DRIVE_SETTINGS:
 		return dptxport_call_set_drive_settings(service, data, data_size,
 							reply, reply_size);
-        case DPTX_APCALL_ACTIVATE: {
-		int ret = dptxport_call_activate(service, data, data_size,
-						 reply, reply_size);
-
-		if (!ret && dcp_is_usb4_output(service->ep->dcp) &&
-		    dptx->lane_count) {
-			dev_info(service->ep->dcp->dev,
-				 "USB4: complete linkcfg after ACTIVATE (lanes=%u)\n",
-				 dptx->lane_count);
-			complete(&dptx->linkcfg_completion);
-		}
-		return ret;
-	}
+        case DPTX_APCALL_ACTIVATE:
+		return dptxport_call_activate(service, data, data_size,
+					      reply, reply_size);
 	case DPTX_APCALL_DEACTIVATE:
 		return dptxport_call_deactivate(service, data, data_size,
 						reply, reply_size);
@@ -630,17 +620,11 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 	case DPTX_APCALL_INACTIVE_SINK_DETECTED:
 		dev_info(service->ep->dcp->dev,
 			 "DPTXPort: INACTIVE_SINK_DETECTED\n");
+		dptx->usb4_inactive_sink = true;
+		complete(&dptx->linkcfg_completion);
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
-		if (dcp_is_usb4_output(service->ep->dcp)) {
-			struct apple_dcp *dcp = service->ep->dcp;
-
-			dcp->typec_reconnect_tries = 2;
-			mod_delayed_work(system_freezable_wq,
-					 &dcp->typec_reconnect_wq,
-					 msecs_to_jiffies(200));
-		}
 		return 0;
 	default:
 		/* just try to ACK and hope for the best... */

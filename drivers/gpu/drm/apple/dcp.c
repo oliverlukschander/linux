@@ -1320,6 +1320,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
 	/* USB4: drive the dedicated DPTX PHY (not the USB4 ATC). */
 	dcp->dptxport[port].atcphy = usb4 ? dcp->fixed_phy : dcp->phy;
@@ -1364,6 +1365,11 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	mutex_unlock(&dcp->hpd_mutex);
 	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
 				    DPTX_CONNECT_TIMEOUT);
+	if (dcp->dptxport[port].usb4_inactive_sink) {
+		dev_info(dcp->dev, "USB4: inactive sink on this mux, will retry dpin\n");
+		ret = -EAGAIN;
+		goto out_disconnect;
+	}
 	if (!ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: timed out waiting for port %u link configuration\n",
@@ -1412,7 +1418,8 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 		return;
 	}
 
-	if (dcp_is_usb4_output(dcp) && dcp->typec_reconnect_tries == 2 &&
+	if (dcp_is_usb4_output(dcp) &&
+	    (dcp->typec_reconnect_tries == 0 || dcp->typec_reconnect_tries == 2) &&
 	    dcp->active_typec_route && dcp->active_typec_route->xbar &&
 	    dcp->active_typec_route->xbar->chip) {
 		struct apple_dcp_typec_route *route = dcp->active_typec_route;
