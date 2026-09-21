@@ -1070,15 +1070,12 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 	if (dcp->main_display)
 		return;
 	/*
-	 * USB4 DPTX training cloned 3456x2234@120 onto dcpext and blanked
-	 * eDP. Keep the DRM connector disconnected until sink EDID is real.
+	 * Report firmware hotplug independently of the USB4 PHY experiment.
+	 * Reassigning lpdptxphy blanked eDP even with these callbacks ignored;
+	 * suppressing connector notifications does not protect the panel.
+	 * Mode probing still uses this DCP's firmware modes, and mode_valid
+	 * rejects modes absent from that list. Do not synthesize a mode here.
 	 */
-	if (dcp_is_usb4_output(dcp) && !dcp_usb4_drm_allowed()) {
-		dev_info(dcp->dev,
-			 "cb_hotplug() ignored on USB4 connected:%llu\n",
-			 *connected);
-		return;
-	}
 
 	if (dcp->during_modeset) {
 		/*
@@ -1095,8 +1092,8 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 		return;
 	}
 
-	dev_info(dcp->dev, "cb_hotplug() connected:%llu, valid_mode:%d\n",
-		 *connected, dcp->valid_mode);
+	dev_info(dcp->dev, "cb_hotplug() connected:%llu, valid_mode:%d nr_modes:%u\n",
+		 *connected, dcp->valid_mode, dcp->nr_modes);
 
 	/* Hotplug invalidates mode. DRM doesn't always handle this. */
 	if (!(*connected)) {
