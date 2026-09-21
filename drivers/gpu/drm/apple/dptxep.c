@@ -502,11 +502,14 @@ static int dptxport_call_get_supports_hpd(struct apple_epic_service *service,
 
 	reply->retcode = cpu_to_le32(0);
 	/*
-	 * USB4 DP IN is not Type-C HPD. Advertising Type-C HPD makes
-	 * firmware wait on AFK 8,8 which times out while the ATC is USB4.
+	 * Analog DPIN CORE=1 already uses AFK set_hpd (returns 0).
+	 * Denying HPD here made request_display ACTIVATE then 22/24
+	 * DEVICE_NOT_STARTED (~5.5s). Advertise HPD so firmware uses
+	 * that path instead of waiting for a PHY start.
 	 */
-	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp) &&
-				       !dcp_is_usb4_output(dcp));
+	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp) ? 1 : 0);
+	dev_info(dcp->dev, "DPTXPort: GET_SUPPORTS_HPD %u usb4=%d\n",
+		 le32_to_cpu(reply->supported), dcp_is_usb4_output(dcp));
 	return 0;
 }
 
