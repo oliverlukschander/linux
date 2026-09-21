@@ -2890,6 +2890,8 @@ static void tb_handle_notification(struct tb *tb, u64 route,
 	case TB_CFG_ERROR_PCIE_WAKE:
 	case TB_CFG_ERROR_DP_CON_CHANGE:
 	case TB_CFG_ERROR_DPTX_DISCOVERY:
+		tb_info(tb, "DPTX discovery notification route=%llx port=%u\n",
+			route, error->port);
 		if (tb_cfg_ack_notification(tb->ctl, route, error))
 			tb_warn(tb, "could not ack notification on %llx\n",
 				route);

@@ -470,6 +470,12 @@ struct tb_regs_port_header {
 #define ADP_DP_CS_8				0x08
 #define ADP_DP_CS_8_DPME			BIT(30)
 #define ADP_DP_CS_8_DR				BIT(31)
+#define ADP_DP_CS_9				0x09
+#define ADP_DP_CS_13				0x0d
+/* USB4 CM Guide 5.4.1.4: DPTX Discovery Mode. Bit position not in that
+ * guide; bit 0 is the enable-style field used on other DP CS words.
+ */
+#define ADP_DP_CS_13_DPTX_DISCOVERY_MODE	BIT(0)
 
 /* PCIe adapter registers */
 #define ADP_PCIE_CS_0				0x00
