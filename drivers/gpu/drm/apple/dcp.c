@@ -1347,10 +1347,10 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
 	/*
-	 * USB4 AUX/lanes go through ACIO DP IN, not the HDMI analog PHY or
-	 * the USB4-occupied ATC. Leave atcphy NULL so APCALLs stay logical.
+	 * USB4: bind the Type-C DP PHY so ACTIVATE can enable lpdptx AUX
+	 * without switching USB4 lanes (phy-apple-atc USB4 set_mode).
 	 */
-	dcp->dptxport[port].atcphy = usb4 ? NULL : dcp->phy;
+	dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {

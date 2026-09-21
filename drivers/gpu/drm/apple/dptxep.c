@@ -353,7 +353,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	}
 
 	if (dptx->phy_ops.dp.set_lanes) {
-		if (dptx->atcphy) {
+		if (dptx->atcphy && !dcp_is_usb4_output(dcp)) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
@@ -465,13 +465,12 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 		dptx->phy_ops.dp.link_rate = phy_link_rate;
 		dptx->phy_ops.dp.set_rate = 1;
 
-		if (dptx->atcphy) {
+		if (dptx->atcphy && !dcp_is_usb4_output(service->ep->dcp)) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
 		}
 
-		//if (dptx->phy_ops.dp.set_rate)
 		dptx->link_rate = dptx->pending_link_rate = link_rate;
 
 	}
@@ -536,7 +535,10 @@ dptxport_call_activate(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
 
-	/* Standalone PHYs need DCP input selection. USB4 uses the DPTX PHY. */
+	/*
+	 * Standalone PHYs need DCP input selection. USB4 keeps ATC lanes
+	 * in USB4 and only enables lpdptx AUX (phy-apple-atc set_mode).
+	 */
 	if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
