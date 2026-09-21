@@ -20,6 +20,7 @@
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/of_platform.h>
+#include <linux/phy/phy.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/string.h>
@@ -1322,12 +1323,15 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
 #define DPTX_RECONNECT_RETRIES 1
 
+static struct phy *usb4_lpdptx_phy;
+
 static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 {
 	static bool tried;
 	struct device_node *np;
 	struct platform_device *pdev;
 	struct resource res[2];
+	struct of_phandle_args args = { };
 	int nres = 0, ret;
 
 	if (tried)
@@ -1378,7 +1382,18 @@ static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 	}
 	dev_info(dcp->dev, "USB4: instantiated lpdptxphy %s\n",
 		 dev_name(&pdev->dev));
-	msleep(50);
+	wait_for_device_probe();
+	args.np = np;
+	usb4_lpdptx_phy = of_phy_simple_xlate(&pdev->dev, &args);
+	if (IS_ERR_OR_NULL(usb4_lpdptx_phy)) {
+		usb4_lpdptx_phy = phy_get(&pdev->dev, NULL);
+		if (IS_ERR(usb4_lpdptx_phy))
+			usb4_lpdptx_phy = NULL;
+	}
+	if (usb4_lpdptx_phy)
+		dev_info(dcp->dev, "USB4: got lpdptxphy phy\n");
+	else
+		dev_warn(dcp->dev, "USB4: lpdptxphy bound but phy_get failed\n");
 }
 
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
@@ -1413,7 +1428,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	if (!usb4)
+	if (usb4)
+		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
+	else
 		dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
