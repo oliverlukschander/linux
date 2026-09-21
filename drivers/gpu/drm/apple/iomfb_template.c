@@ -646,6 +646,19 @@ static void boot_3(struct apple_dcp *dcp, void *out, void *cookie)
 
 static void boot_2(struct apple_dcp *dcp, void *out, void *cookie)
 {
+	/*
+	 * dcpext comes out of iBoot at run mode 2. With no panel timing,
+	 * setup_video_limits steps that pipe 2 -> 0 and disables it, so
+	 * the USB4 crossbar write clock never starts. The internal panel
+	 * is not apple,dcpext and still takes this call.
+	 */
+	if (of_device_is_compatible(dcp->dev->of_node, "apple,dcpext")) {
+		dev_info(dcp->dev,
+			 "dcpext: skip setup_video_limits (keep run mode 2)\n");
+		boot_3(dcp, NULL, NULL);
+		return;
+	}
+
 	dcp_setup_video_limits(dcp, false, boot_3, NULL);
 }
 
