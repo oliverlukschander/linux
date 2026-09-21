@@ -40,6 +40,7 @@ struct apple_dcp_typec_route {
 	struct typec_mux_dev *typec_mux;
 	u32 dptx_phy;
 	u32 mux_index;
+	u32 typec_index;
 	bool selected;
 	bool usb4_selected;
 };
