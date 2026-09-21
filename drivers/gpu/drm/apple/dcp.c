@@ -1426,19 +1426,21 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 	}
 
 	if (dcp_is_usb4_output(dcp) && dcp->typec_reconnect_tries == 1) {
-		static const int atc_cycle[] = { 2, 3, 0, 1, 4 };
-		int n = ARRAY_SIZE(atc_cycle);
-		int i, next = atc_cycle[0];
+		static const unsigned int or_cycle[] = {
+			0, 0x1000, 0x2000, 0x4000, 0x200, 0x100, 0x1,
+		};
+		int n = ARRAY_SIZE(or_cycle);
+		int i, next = 0;
 
 		for (i = 0; i < n; i++) {
-			if (atc_cycle[i] == usb4_atc) {
-				next = atc_cycle[(i + 1) % n];
+			if (or_cycle[i] == usb4_target_or) {
+				next = (i + 1) % n;
 				break;
 			}
 		}
-		usb4_atc = next;
-		dcp->dptx_phy = next;
-		dev_info(dcp->dev, "USB4: cycle DPTX atc to %d\n", next);
+		usb4_target_or = or_cycle[next];
+		dev_info(dcp->dev, "USB4: cycle target OR to 0x%x\n",
+			 usb4_target_or);
 	}
 
 	if (dcp_is_usb4_output(dcp) &&

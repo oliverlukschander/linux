@@ -8,7 +8,7 @@
 #include <linux/delay.h>
 
 /* Extra bits OR'd into DPTX remote-port target for USB4 (bit 12 = guess for DPIN). */
-static unsigned int usb4_target_or = 0x1000;
+unsigned int usb4_target_or;
 module_param(usb4_target_or, uint, 0644);
 MODULE_PARM_DESC(usb4_target_or,
 		 "OR into USB4 DPTX remote-port target (default 0x1000)");
@@ -646,9 +646,6 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		 */
 		dev_info(service->ep->dcp->dev,
 			 "DPTXPort: INACTIVE_SINK_DETECTED (keep waiting for lanes)\n");
-		mod_delayed_work(system_freezable_wq,
-				 &service->ep->dcp->usb4_hpd_wq,
-				 msecs_to_jiffies(50));
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
