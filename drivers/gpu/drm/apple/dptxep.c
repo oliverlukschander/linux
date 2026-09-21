@@ -570,6 +570,7 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
 
+	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
 	if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);

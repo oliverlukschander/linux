@@ -1438,46 +1438,50 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up. 0075 analog pulse on ACTIVATE bounced
-		 * and consumed +0x18. Bind CORE=1 with ATC=4 (lpdptxphy
-		 * firmware object, target 0x9041) without core+0x10.
-		 * usb4_atc=0 rolls back to 0x9001. No analog MMIO.
+		 * Analog PHY is up. 0076 0x9041 (ATC=4) DEACTIVATEd.
+		 * 0073 0x9001 ACTIVATEd. Bind the second RemotePort
+		 * (unit 1 / channel 3) with CORE=1 ATC=0. usb4_atc=4
+		 * retries 0076. No analog MMIO, no core+0x10.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
-			u8 atc = (usb4_atc >= 0) ? usb4_atc : 4;
+			u8 atc = (usb4_atc >= 0) ? usb4_atc : 0;
+			u32 bind = port;
 			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL,
 			    r = -EINVAL;
 
+			if (dcp->dptxport[1].enabled &&
+			    dcp->dptxport[1].service)
+				bind = 1;
 			cores[n++] = (usb4_core == 2) ? 2 : 1;
 			cores[n++] = (cores[0] == 1) ? 2 : 1;
+			dev_info(dcp->dev,
+				 "USB4: analog DPIN bind port=%u (unit %u)\n",
+				 bind, dcp->dptxport[bind].unit);
 			mutex_lock(&dcp->hpd_mutex);
 			for (i = 0; i < n; i++) {
 				u8 core = cores[i];
+				struct apple_epic_service *svc =
+					dcp->dptxport[bind].service;
 
 				v = dptxport_validate_connection(
-					dcp->dptxport[port].service, core, atc,
-					dcp->dptx_die);
+					svc, core, atc, dcp->dptx_die);
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN validate core=%u atc=%u: %d\n",
 					 core, atc, v);
 				if (v)
 					continue;
-				c = dptxport_connect(dcp->dptxport[port].service,
-						     core, atc, dcp->dptx_die,
-						     true);
+				c = dptxport_connect(svc, core, atc,
+						     dcp->dptx_die, true);
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN connect core=%u atc=%u HPD: %d\n",
 					 core, atc, c);
 				if (!c)
-					h = dptxport_set_hpd(
-						dcp->dptxport[port].service,
-						true);
+					h = dptxport_set_hpd(svc, true);
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN set_hpd: %d\n", h);
 				if (!h) {
-					r = dptxport_request_display(
-						dcp->dptxport[port].service);
+					r = dptxport_request_display(svc);
 					dev_info(dcp->dev,
 						 "USB4: analog DPIN request_display core=%u atc=%u: %d\n",
 						 core, atc, r);
