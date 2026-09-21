@@ -240,7 +240,13 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	route->usb4_selected = usb4;
 
 	dcp->phy = route->phy;
-	dcp->dptx_phy = route->dptx_phy;
+	/*
+	 * USB4 DP IN is the DCP's own DPTX (apple,dptx-phy), routed onto
+	 * the USB4 DP IN adapter by the crossbar. The Type-C ATC index
+	 * (typec-dptx-phys) is DP alt-mode only — targeting it while the
+	 * ATC is in USB4 makes firmware report DEVICE_NOT_STARTED.
+	 */
+	dcp->dptx_phy = usb4 ? dcp->fixed_dptx_phy : route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	if (route->port->connector) {
 		route->port->connector->dcp = to_platform_device(dcp->dev);
