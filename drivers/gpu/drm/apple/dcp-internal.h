@@ -48,6 +48,7 @@ struct apple_dcp_typec_route {
 bool dcp_is_typec_output(struct apple_dcp *dcp);
 bool dcp_is_usb4_output(struct apple_dcp *dcp);
 bool dcp_usb4_drm_allowed(void);
+bool dcp_usb4_protocol_probe_enabled(void);
 
 struct dcpav_service_epic;
 

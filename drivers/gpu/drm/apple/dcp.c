@@ -115,6 +115,18 @@ MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 static struct apple_dcp *usb4_armed_dcp;
 static bool usb4_force_dptx;
 
+/* Opt-in, one attempt per module lifetime; never a live parameter write. */
+static bool usb4_protocol_probe;
+module_param(usb4_protocol_probe, bool, 0444);
+MODULE_PARM_DESC(usb4_protocol_probe,
+		 "One USB4 typec0 protocol probe using target 0x8001, without a PHY");
+static atomic_t usb4_protocol_probe_started = ATOMIC_INIT(0);
+
+bool dcp_usb4_protocol_probe_enabled(void)
+{
+	return usb4_protocol_probe;
+}
+
 bool dcp_usb4_drm_allowed(void)
 {
 	return usb4_force_dptx;
@@ -1418,6 +1430,71 @@ static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 		dev_warn(dcp->dev, "USB4: lpdptxphy bound but phy_get failed\n");
 }
 
+static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
+{
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	struct dptx_port *dptx = &dcp->dptxport[port];
+	struct apple_epic_service *svc = dptx->service;
+	int ret;
+
+	/* This probe is bounded to the confirmed left-back DP IN 0:5 route. */
+	if (!route || !route->usb4_selected || !route->usb4_xbar ||
+	    route->typec_index != 0 || port != 0 || usb4_dpin_index != 1 ||
+	    dcp->index != 2 || dcp->dptx_die != 0 ||
+	    usb4_force_dptx || !dptx->enabled || !svc)
+		return -EINVAL;
+
+	mutex_lock(&dcp->hpd_mutex);
+	/* ACTIVATE must never receive a PHY to configure in this experiment. */
+	if (dptx->atcphy) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (dptx->connected) {
+		ret = 0;
+		goto out;
+	}
+	if (atomic_cmpxchg(&usb4_protocol_probe_started, 0, 1)) {
+		ret = -EALREADY;
+		goto out;
+	}
+
+	reinit_completion(&dptx->linkcfg_completion);
+	reinit_completion(&dptx->usb4_lane_completion);
+	dptx->lane_count = 0;
+	dev_info(dcp->dev, "USB4 protocol probe: target=0x8001, PHY absent, one attempt\n");
+	ret = dptxport_validate_connection(svc, 1, 0, dcp->dptx_die);
+	dev_info(dcp->dev, "USB4 protocol probe: validate=%d\n", ret);
+	if (ret)
+		goto out;
+	ret = dptxport_connect(svc, 1, 0, dcp->dptx_die, true);
+	dev_info(dcp->dev, "USB4 protocol probe: connect=%d\n", ret);
+	if (ret)
+		goto out;
+	ret = dptxport_request_display(svc);
+	dev_info(dcp->dev, "USB4 protocol probe: request_display=%d modes=%u\n",
+		 ret, dcp->nr_modes);
+	if (ret)
+		goto out;
+	/* Record ownership so ordinary unplug releases this request. */
+	dptx->connected = true;
+
+	/* Retain the existing post-reset crossbar selection for this comparison. */
+	mux_control_deselect(route->usb4_xbar);
+	ret = mux_control_select(route->usb4_xbar, route->mux_index);
+	dev_info(dcp->dev, "USB4 protocol probe: reselect=%d\n", ret);
+	if (ret)
+		goto out;
+
+	/* One HPD assertion, after power, as in the working physical DP path. */
+	ret = dptxport_set_hpd_timeout(svc, true, 8000);
+	dev_info(dcp->dev, "USB4 protocol probe: HPD=%d lanes=%u modes=%u\n",
+		 ret, dptx->lane_count, dcp->nr_modes);
+out:
+	mutex_unlock(&dcp->hpd_mutex);
+	return ret;
+}
+
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	bool usb4 = false;
@@ -1433,6 +1510,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp_is_typec_output(dcp),
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
+
+	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe)
+		return dcp_usb4_protocol_connect(dcp, port);
 
 	if (dcp_is_usb4_output(dcp) && !usb4_force_dptx) {
 		/*
@@ -1948,6 +2028,10 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 	if (!READ_ONCE(dcp->typec_cable_connected))
 		return;
 	ret = dcp_dptx_connect(dcp, 0);
+	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe) {
+		dev_info(dcp->dev, "USB4 protocol probe finished: %d; no automatic retry\n", ret);
+		return;
+	}
 	if (!ret) {
 		dcp->typec_reconnect_tries = 0;
 		return;

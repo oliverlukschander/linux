@@ -89,7 +89,7 @@ static u32 dptxport_remote_target(struct apple_dcp *dcp, u8 core, u8 atc,
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
 		     DCPDPTX_REMOTE_PORT_CONNECTED;
 
-	if (dcp_is_usb4_output(dcp)) {
+	if (dcp_is_usb4_output(dcp) && !dcp_usb4_protocol_probe_enabled()) {
 		unsigned int dpin = (usb4_dpin_index == 2) ? 2 : 1;
 
 		/* CORE 1/2 = USB4 dpin0/dpin1. DPIN selects analog. ATC=0. */
