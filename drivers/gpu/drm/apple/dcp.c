@@ -650,9 +650,11 @@ static int dcp_usb4_arm_typec(int typec_index)
 		target->hpd = true;
 		dcp->typec_reconnect_tries = 0;
 		cancel_delayed_work(&dcp->typec_reconnect_wq);
+		mod_delayed_work(system_freezable_wq, &dcp->typec_reconnect_wq,
+				 DPTX_USB4_CONNECT_DELAY);
 		dev_info(dcp->dev,
-			 "USB4 DP IN armed typec%u; ACIO AUX owns adapter 0:5 (no DPTX PHY)\n",
-			 typec_index);
+			 "USB4 DP IN armed typec%u; DPTX HPD in %u ms (no PHY connect)\n",
+			 typec_index, jiffies_to_msecs(DPTX_USB4_CONNECT_DELAY));
 	}
 	mutex_unlock(&dcp_typec_fabric_lock);
 	return 0;
@@ -1425,6 +1427,54 @@ out_unlock:
 	return ret;
 }
 
+static int dcp_usb4_notify_sink(struct apple_dcp *dcp)
+{
+	int ret;
+
+	mutex_lock(&dcp->hpd_mutex);
+	if (!dcp->dptxport[0].enabled || !dcp->dptxport[0].service) {
+		mutex_unlock(&dcp->hpd_mutex);
+		dev_info(dcp->dev, "USB4: DPTX service not ready for sink HPD\n");
+		return -ENODEV;
+	}
+	if (dcp->dptxport[0].connected) {
+		mutex_unlock(&dcp->hpd_mutex);
+		return 0;
+	}
+
+	reinit_completion(&dcp->dptxport[0].linkcfg_completion);
+	dcp->dptxport[0].usb4_inactive_sink = false;
+
+	ret = dptxport_request_display(dcp->dptxport[0].service);
+	if (ret) {
+		dev_warn(dcp->dev, "USB4: request_display (no connect): %d\n",
+			 ret);
+		mutex_unlock(&dcp->hpd_mutex);
+		return ret;
+	}
+	dcp->dptxport[0].connected = true;
+	ret = dptxport_set_hpd(dcp->dptxport[0].service, true);
+	if (ret) {
+		dev_warn(dcp->dev, "USB4: set_hpd (no connect): %d\n", ret);
+		dcp->dptxport[0].connected = false;
+		dptxport_release_display(dcp->dptxport[0].service);
+		mutex_unlock(&dcp->hpd_mutex);
+		return ret;
+	}
+	dev_info(dcp->dev, "USB4: DPTX request_display+HPD (no PHY connect)\n");
+	mutex_unlock(&dcp->hpd_mutex);
+
+	ret = wait_for_completion_timeout(&dcp->dptxport[0].linkcfg_completion,
+					  msecs_to_jiffies(8000));
+	if (!ret) {
+		dev_info(dcp->dev,
+			 "USB4: no linkcfg after HPD-only notify\n");
+		return -ETIMEDOUT;
+	}
+	dev_info(dcp->dev, "USB4: linkcfg after HPD-only notify\n");
+	return 0;
+}
+
 static void dcp_typec_reconnect_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp =
@@ -1434,8 +1484,10 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 
 	if (!READ_ONCE(dcp->typec_cable_connected))
 		return;
-	if (dcp_is_usb4_output(dcp))
+	if (dcp_is_usb4_output(dcp)) {
+		dcp_usb4_notify_sink(dcp);
 		return;
+	}
 
 	ret = dcp_dptx_connect(dcp, 0);
 	if (!ret) {
