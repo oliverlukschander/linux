@@ -1327,6 +1327,8 @@ static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 	static bool tried;
 	struct device_node *np;
 	struct platform_device *pdev;
+	struct resource res[2];
+	int nres = 0, ret;
 
 	if (tried)
 		return;
@@ -1345,10 +1347,33 @@ static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 		of_node_put(np);
 		return;
 	}
-	pdev = of_platform_device_create(np, NULL, NULL);
-	of_node_put(np);
+	/*
+	 * of_platform_device_create() skips status=disabled. Attach the
+	 * existing DT node (phy@39c000000) as a platform device.
+	 */
+	pdev = platform_device_alloc("phy-apple-dptx", PLATFORM_DEVID_NONE);
 	if (!pdev) {
-		dev_warn(dcp->dev, "USB4: failed to instantiate lpdptxphy\n");
+		of_node_put(np);
+		dev_warn(dcp->dev, "USB4: platform_device_alloc lpdptxphy failed\n");
+		return;
+	}
+	if (!of_address_to_resource(np, 0, &res[nres]))
+		nres++;
+	if (!of_address_to_resource(np, 1, &res[nres]))
+		nres++;
+	ret = platform_device_add_resources(pdev, res, nres);
+	if (ret) {
+		dev_warn(dcp->dev, "USB4: lpdptxphy resources: %d\n", ret);
+		platform_device_put(pdev);
+		of_node_put(np);
+		return;
+	}
+	pdev->dev.of_node = np;
+	ret = platform_device_add(pdev);
+	if (ret) {
+		dev_warn(dcp->dev, "USB4: platform_device_add lpdptxphy: %d\n",
+			 ret);
+		platform_device_put(pdev);
 		return;
 	}
 	dev_info(dcp->dev, "USB4: instantiated lpdptxphy %s\n",
