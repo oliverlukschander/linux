@@ -1438,13 +1438,14 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up. Bind DPIN CORE=1 (0x9001). 0073
-		 * GET_SUPPORTS_HPD=1 stopped 22/24. 0074 set_hpd after
-		 * request_display timed out (-110). set_hpd before the
-		 * nub; analog start is on ACTIVATE. No lpdptxphy steal.
+		 * Analog PHY is up. 0075 analog pulse on ACTIVATE bounced
+		 * and consumed +0x18. Bind CORE=1 with ATC=4 (lpdptxphy
+		 * firmware object, target 0x9041) without core+0x10.
+		 * usb4_atc=0 rolls back to 0x9001. No analog MMIO.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
 			u8 cores[2];
+			u8 atc = (usb4_atc >= 0) ? usb4_atc : 4;
 			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL,
 			    r = -EINVAL;
 
@@ -1455,19 +1456,19 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 				u8 core = cores[i];
 
 				v = dptxport_validate_connection(
-					dcp->dptxport[port].service, core, 0,
+					dcp->dptxport[port].service, core, atc,
 					dcp->dptx_die);
 				dev_info(dcp->dev,
-					 "USB4: analog DPIN validate core=%u atc=0: %d\n",
-					 core, v);
+					 "USB4: analog DPIN validate core=%u atc=%u: %d\n",
+					 core, atc, v);
 				if (v)
 					continue;
 				c = dptxport_connect(dcp->dptxport[port].service,
-						     core, 0, dcp->dptx_die,
+						     core, atc, dcp->dptx_die,
 						     true);
 				dev_info(dcp->dev,
-					 "USB4: analog DPIN connect core=%u atc=0 HPD: %d\n",
-					 core, c);
+					 "USB4: analog DPIN connect core=%u atc=%u HPD: %d\n",
+					 core, atc, c);
 				if (!c)
 					h = dptxport_set_hpd(
 						dcp->dptxport[port].service,
@@ -1478,8 +1479,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 					r = dptxport_request_display(
 						dcp->dptxport[port].service);
 					dev_info(dcp->dev,
-						 "USB4: analog DPIN request_display core=%u: %d\n",
-						 core, r);
+						 "USB4: analog DPIN request_display core=%u atc=%u: %d\n",
+						 core, atc, r);
 				}
 				break;
 			}
