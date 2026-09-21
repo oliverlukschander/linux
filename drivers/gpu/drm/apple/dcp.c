@@ -1364,12 +1364,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	mutex_unlock(&dcp->hpd_mutex);
 	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
-				    DPTX_CONNECT_TIMEOUT);
-	if (dcp->dptxport[port].usb4_inactive_sink) {
-		dev_info(dcp->dev, "USB4: inactive sink on this mux, will retry dpin\n");
-		ret = -EAGAIN;
-		goto out_disconnect;
-	}
+				    usb4 ? msecs_to_jiffies(8000) :
+					   DPTX_CONNECT_TIMEOUT);
 	if (!ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: timed out waiting for port %u link configuration\n",

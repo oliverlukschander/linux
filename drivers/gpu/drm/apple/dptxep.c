@@ -343,8 +343,11 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	reply->retcode = cpu_to_le32(retcode);
 	reply->lane_count = cpu_to_le64(lane_count);
 
-	if (lane_count > 0)
+	if (lane_count > 0) {
+		dev_info(dcp->dev, "USB4/DPTX: SET_ACTIVE_LANE_COUNT %llu\n",
+			 lane_count);
 		complete(&dptx->linkcfg_completion);
+	}
 
 	return ret;
 }
@@ -403,6 +406,8 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 
 	link_rate = le32_to_cpu(request->link_rate);
 	trace_dptxport_call_set_link_rate(dptx, link_rate);
+	dev_info(service->ep->dcp->dev, "DPTXPort: SET_LINK_RATE 0x%x\n",
+		 link_rate);
 
 	switch (link_rate) {
 	case LINK_RATE_RBR:
@@ -618,10 +623,13 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 			memset(reply, 0, 4);
 		return 0;
 	case DPTX_APCALL_INACTIVE_SINK_DETECTED:
+		/*
+		 * Normal prelude to link training on USB4. Ack and wait for
+		 * SET_ACTIVE_LANE_COUNT. Treating this as failure made
+		 * firmware DEACTIVATE after it had already set lanes/rate.
+		 */
 		dev_info(service->ep->dcp->dev,
-			 "DPTXPort: INACTIVE_SINK_DETECTED\n");
-		dptx->usb4_inactive_sink = true;
-		complete(&dptx->linkcfg_completion);
+			 "DPTXPort: INACTIVE_SINK_DETECTED (keep waiting for lanes)\n");
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
