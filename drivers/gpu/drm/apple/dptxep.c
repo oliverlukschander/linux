@@ -3,8 +3,15 @@
 
 #include <linux/bitfield.h>
 #include <linux/completion.h>
+#include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/delay.h>
+
+/* Extra bits OR'd into DPTX remote-port target for USB4 (bit 12 = guess for DPIN). */
+static unsigned int usb4_target_or = 0x1000;
+module_param(usb4_target_or, uint, 0644);
+MODULE_PARM_DESC(usb4_target_or,
+		 "OR into USB4 DPTX remote-port target (default 0x1000)");
 
 #include "afk.h"
 #include "dcp.h"
@@ -84,7 +91,13 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
 		     DCPDPTX_REMOTE_PORT_CONNECTED;
 
+	if (dcp_is_usb4_output(service->ep->dcp))
+		target |= usb4_target_or;
+
 	trace_dptxport_validate_connection(dptx, core, atc, die);
+	dev_info(service->ep->dcp->dev,
+		 "DPTX validate target=0x%x core=%u atc=%u die=%u or=0x%x\n",
+		 target, core, atc, die, usb4_target_or);
 
 	cmd.target = cpu_to_le32(target);
 	cmd.unk = cpu_to_le32(0x100);
@@ -112,6 +125,9 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
 		     DCPDPTX_REMOTE_PORT_CONNECTED;
+
+	if (dcp_is_usb4_output(service->ep->dcp))
+		target |= usb4_target_or;
 
 	trace_dptxport_connect(dptx, core, atc, die);
 
