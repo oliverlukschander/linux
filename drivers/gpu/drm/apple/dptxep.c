@@ -373,7 +373,13 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	if (lane_count > 0) {
 		dev_info(dcp->dev, "USB4/DPTX: SET_ACTIVE_LANE_COUNT %llu\n",
 			 lane_count);
-		complete(&dptx->linkcfg_completion);
+		/*
+		 * Completing linkcfg on USB4 made KMS modeset 3456x2234@120
+		 * onto dcpext and blanked eDP. Train, but do not mark the
+		 * DRM connector connected until the sink EDID is real.
+		 */
+		if (!dcp_is_usb4_output(dcp))
+			complete(&dptx->linkcfg_completion);
 	}
 
 	return ret;
