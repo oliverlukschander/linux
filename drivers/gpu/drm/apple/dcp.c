@@ -196,14 +196,15 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 }
 
 /*
- * USB4 DP IN: prefer the USB-C dcpext. The HDMI hybrid's dedicated DPTX PHY 3
- * trains the empty HDMI jack even when the USB-C crossbar dpin mux is selected.
+ * USB4 DP IN: prefer the HDMI hybrid dcpext. Firmware has a DPTX object
+ * for PHY 3; ATC 2 in USB4 has none (device == NULL). Digital from
+ * dispext0 feeds both HDMI analog and USB-C dpin0.
  */
 static unsigned int dcp_typec_route_score_usb4(struct apple_dcp_typec_route *route)
 {
 	unsigned int score = dcp_typec_route_score(route);
 
-	if (route->dcp->fixed_phy)
+	if (!route->dcp->fixed_phy)
 		score += 100;
 	return score;
 }
@@ -253,14 +254,17 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 
 	dcp->phy = route->phy;
 	/*
-	 * USB4 pixels leave the DCP as digital DPTX; the crossbar must
-	 * switch dpin0/dpin1 onto ACIO DP IN. Firmware remote-port ATC is
-	 * the Type-C port index. HDMI PHY 3 is the empty analog jack.
+	 * USB4: firmware DPTX object is HDMI PHY 3 on the hybrid dcpext.
+	 * Crossbar dpin0 still takes this DCP's digital onto ACIO DP IN.
 	 */
 	if (usb4 && usb4_atc >= 0)
 		dcp->dptx_phy = usb4_atc;
+	else if (usb4 && dcp->fixed_dptx_phy)
+		dcp->dptx_phy = dcp->fixed_dptx_phy;
 	else
 		dcp->dptx_phy = route->dptx_phy;
+	if (usb4 && dcp->fixed_phy)
+		dcp->phy = dcp->fixed_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	if (route->port->connector) {
 		route->port->connector->dcp = to_platform_device(dcp->dev);
@@ -285,11 +289,10 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	route->selected = true;
 
 	/*
-	 * Firmware looks up the DPTX device at validate/connect, before
-	 * ACTIVATE. Enable lpdptx AUX now so ATC 2 exists as a DPTX object.
-	 * phy-apple-atc does not switch USB4 lanes.
+	 * ATC 2 in USB4 has no firmware DPTX object. Only poke lpdptx when
+	 * this DCP has no dedicated PHY 3 engine.
 	 */
-	if (usb4 && route->phy) {
+	if (usb4 && route->phy && !dcp->fixed_phy) {
 		ret = phy_set_mode_ext(route->phy, PHY_MODE_DP, dcp->index);
 		if (ret)
 			dev_warn(dcp->dev,
