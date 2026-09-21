@@ -1412,8 +1412,12 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
 
-	if (dcp_is_usb4_output(dcp))
+	if (dcp_is_usb4_output(dcp)) {
 		dcp_usb4_enable_lpdptxphy(dcp);
+		dev_info(dcp->dev,
+			 "USB4: skip DPTX connect (lpdptxphy DCP assign blanks eDP)\n");
+		return 0;
+	}
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (!dcp->dptxport[port].enabled) {
@@ -1429,9 +1433,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dcp->dptxport[port].usb4_lane_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
 	usb4 = dcp_is_usb4_output(dcp);
-	if (usb4)
-		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
-	else
+	if (!usb4)
 		dcp->dptxport[port].atcphy = dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
