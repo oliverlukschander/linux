@@ -1433,7 +1433,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 * connect, request_display, or set_hpd.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
-			int v, c, h = -EINVAL, r = -EINVAL;
+			int v, c, h = -EINVAL;
 
 			mutex_lock(&dcp->hpd_mutex);
 			v = dptxport_validate_connection(
@@ -1452,13 +1452,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			if (!c)
 				h = dptxport_set_hpd(dcp->dptxport[port].service,
 						     true);
-			dev_info(dcp->dev, "USB4: analog DPIN set_hpd: %d\n", h);
-			if (!h)
-				r = dptxport_request_display(
-					dcp->dptxport[port].service);
 			mutex_unlock(&dcp->hpd_mutex);
-			dev_info(dcp->dev,
-				 "USB4: analog DPIN request_display: %d\n", r);
+			dev_info(dcp->dev, "USB4: analog DPIN set_hpd: %d\n", h);
 		}
 		return 0;
 	}
