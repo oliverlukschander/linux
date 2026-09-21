@@ -1396,41 +1396,6 @@ static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
 		dev_warn(dcp->dev, "USB4: lpdptxphy bound but phy_get failed\n");
 }
 
-/*
- * Full phy_set_mode(DP) runs dptx_phy_activate() analog bring-up and
- * blanks eDP. Firmware looks up the DPTX object by DCP index at
- * core+0x10. Assign that index only; analog stays on the display
- * crossbar dpin mux.
- */
-static void dcp_usb4_assign_lpdptxphy(struct apple_dcp *dcp)
-{
-	struct device_node *np;
-	struct resource res;
-	void __iomem *core;
-	u32 old, now;
-
-	np = of_find_compatible_node(NULL, NULL, "apple,t6020-dptx-phy");
-	if (!np)
-		return;
-	if (of_address_to_resource(np, 0, &res)) {
-		of_node_put(np);
-		return;
-	}
-	of_node_put(np);
-
-	core = ioremap(res.start, resource_size(&res));
-	if (!core) {
-		dev_warn(dcp->dev, "USB4: ioremap lpdptxphy core failed\n");
-		return;
-	}
-	old = readl(core + 0x10);
-	writel(dcp->index, core + 0x10);
-	now = readl(core + 0x10);
-	dev_info(dcp->dev, "USB4: lpdptxphy core+0x10 %u -> %u (assign only)\n",
-		 old, now);
-	iounmap(core);
-}
-
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	bool usb4 = false;
@@ -1449,7 +1414,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	if (dcp_is_usb4_output(dcp)) {
 		dcp_usb4_enable_lpdptxphy(dcp);
-		dcp_usb4_assign_lpdptxphy(dcp);
+		dev_info(dcp->dev,
+			 "USB4: skip DPTX connect (no lpdptxphy MMIO poke)\n");
+		return 0;
 	}
 
 	mutex_lock(&dcp->hpd_mutex);
