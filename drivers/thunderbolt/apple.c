@@ -705,24 +705,7 @@ static void apple_dp_dump_hop(struct tb_port *port, unsigned int hopid)
 		     hop.initial_credits);
 }
 
-static void apple_dp_set_video_credits(struct tb_port *port)
-{
-	struct tb_regs_hop hop;
-	int ret;
 
-	ret = tb_port_read(port, &hop, TB_CFG_HOPS, 2 * 9, 2);
-	if (ret || !hop.enable)
-		return;
-	if (hop.initial_credits) {
-		tb_port_warn(port, "DP IN hop 9 credits already %u\n",
-			     hop.initial_credits);
-		return;
-	}
-	hop.initial_credits = 7;
-	ret = tb_port_write(port, &hop, TB_CFG_HOPS, 2 * 9, 2);
-	tb_port_warn(port, "DP IN hop 9 credits 0 -> 7 write %d\n", ret);
-	apple_dp_dump_hop(port, 9);
-}
 
 static void apple_dp_dump_adapter(struct tb_port *port, const char *tag)
 {
@@ -1093,7 +1076,6 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 	if (tb_port_is_dpin(in)) {
 		apple_dp_dump_hop(in, 8);
 		apple_dp_dump_hop(in, 9);
-		apple_dp_set_video_credits(in);
 	}
 	if (out && tb_port_is_dpout(out))
 		apple_dp_dump_adapter(out, "hub DP OUT");
