@@ -457,7 +457,12 @@ static int dptxport_call_get_supports_hpd(struct apple_epic_service *service,
 		return -EINVAL;
 
 	reply->retcode = cpu_to_le32(0);
-	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp));
+	/*
+	 * USB4 DP IN is not Type-C HPD. Advertising Type-C HPD makes
+	 * firmware wait on AFK 8,8 which times out while the ATC is USB4.
+	 */
+	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp) &&
+				       !dcp_is_usb4_output(dcp));
 	return 0;
 }
 
@@ -530,6 +535,8 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 {
 	struct dptx_port *dptx = service->cookie;
 	trace_dptxport_apcall(dptx, idx, data_size);
+	dev_info(service->ep->dcp->dev, "DPTXPort: APCALL %u (%zu bytes)\n",
+		 idx, data_size);
 
 	switch (idx) {
 	case DPTX_APCALL_WILL_CHANGE_LINKG_CONFIG:
@@ -582,6 +589,21 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 	case DPTX_APCALL_DEACTIVATE:
 		return dptxport_call_deactivate(service, data, data_size,
 						reply, reply_size);
+	case DPTX_APCALL_FORCE_HOTPLUG_DETECT:
+		dev_info(service->ep->dcp->dev,
+			 "DPTXPort: FORCE_HOTPLUG_DETECT\n");
+		complete(&dptx->linkcfg_completion);
+		memcpy(reply, data, min(reply_size, data_size));
+		if (reply_size >= 4)
+			memset(reply, 0, 4);
+		return 0;
+	case DPTX_APCALL_INACTIVE_SINK_DETECTED:
+		dev_info(service->ep->dcp->dev,
+			 "DPTXPort: INACTIVE_SINK_DETECTED\n");
+		memcpy(reply, data, min(reply_size, data_size));
+		if (reply_size >= 4)
+			memset(reply, 0, 4);
+		return 0;
 	default:
 		/* just try to ACK and hope for the best... */
 		dev_info(service->ep->dcp->dev, "DPTXPort: acking unhandled call %u\n",

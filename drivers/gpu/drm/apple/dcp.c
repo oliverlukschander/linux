@@ -51,7 +51,7 @@
 #define APPLE_DCP_COPROC_CPU_CONTROL_RUN BIT(4)
 
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
-#define DPTX_USB4_CONNECT_DELAY msecs_to_jiffies(2500)
+#define DPTX_USB4_CONNECT_DELAY msecs_to_jiffies(200)
 
 static bool show_notch;
 
@@ -122,6 +122,11 @@ bool dcp_is_typec_output(struct apple_dcp *dcp)
 {
 	return dcp->active_typec_route ||
 	       dcp->fixed_connector_type == DRM_MODE_CONNECTOR_USB;
+}
+
+bool dcp_is_usb4_output(struct apple_dcp *dcp)
+{
+	return dcp->active_typec_route && dcp->active_typec_route->usb4_selected;
 }
 
 static bool dcp_typec_route_is_dp(const struct typec_mux_state *state)
@@ -1309,8 +1314,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
-	dcp->dptxport[port].atcphy = dcp->phy;
-	usb4 = dcp->active_typec_route && dcp->active_typec_route->usb4_selected;
+	usb4 = dcp_is_usb4_output(dcp);
+	/* USB4: ATC PHY is the USB4 router, not a DP PHY. Leave it alone. */
+	dcp->dptxport[port].atcphy = usb4 ? NULL : dcp->phy;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
@@ -1322,7 +1328,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	ret = dptxport_connect(dcp->dptxport[port].service, 0,
 			       dcp->dptx_phy, dcp->dptx_die,
-		       usb4 ? false : dcp_is_typec_output(dcp));
+		       dcp_is_typec_output(dcp));
 	if (ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: failed to connect DPTX target %u:%u: %d\n",
@@ -1338,10 +1344,6 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_release;
 	}
 	dcp->dptxport[port].connected = true;
-	/*
-	 * USB4 DP IN gets HPD from the tunneled DP OUT, not Type-C HPD.
-	 * Asserting Type-C HPD here timed out (-110) on the HDMI-hybrid DCP.
-	 */
 	if (dcp_is_typec_output(dcp) && !usb4) {
 		ret = dptxport_set_hpd(dcp->dptxport[port].service, true);
 		if (ret) {
