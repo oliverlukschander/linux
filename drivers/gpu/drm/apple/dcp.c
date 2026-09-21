@@ -1627,7 +1627,12 @@ static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
 	dcp->nr_modes = 1;
 	WRITE_ONCE(dcp->connector->connected, true);
 	dev_info(dcp->dev,
-		 "USB4: fake 1920x1080 scanout (no iomfb_poweron; it hung reboot)\n");
+		 "USB4: fake 1920x1080; request_display then modeset (no lpdptxphy)\n");
+	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
+		int r = dptxport_request_display(dcp->dptxport[0].service);
+
+		dev_info(dcp->dev, "USB4: request_display %d (no PHY assign)\n", r);
+	}
 	{
 		struct drm_crtc_state fake = { };
 		int mret;
