@@ -78,6 +78,16 @@ module_param_named(usb4_atc, usb4_atc, int, 0644);
 MODULE_PARM_DESC(usb4_atc,
 		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC, 3=HDMI analog)");
 
+/*
+ * USB4 DP IN remote-port CORE. 0070 used CORE=0 (target 0x9000), which is an
+ * AFK paper port with no DPTXController device. 2022 DCP traces of USB4
+ * tunneling used CORE=1 and CORE=2 as ATCPHY_INPUT (dpin0 / dpin1).
+ */
+static int usb4_core = 1;
+module_param_named(usb4_core, usb4_core, int, 0644);
+MODULE_PARM_DESC(usb4_core,
+		 "USB4 DPTX remote-port CORE (1=dpin0, 2=dpin1)");
+
 /* -1 = auto (arm the typecN whose NHI has a Thunderbolt device). 0..2 force. */
 static int usb4_arm = -1;
 static int dcp_usb4_arm_typec(int typec_index);
@@ -1428,32 +1438,46 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
 		/*
-		 * Analog PHY is up (+0x18=0x17). Ask firmware if a DPIN
-		 * remote port exists with ATC=0 (no lpdptxphy). Do not
-		 * connect, request_display, or set_hpd.
+		 * Analog PHY is up. Bind DPIN with ATC=0 and USB4 CORE
+		 * (default 1 = dpin0). 0x9000 (CORE=0) had no DPTX device.
+		 * No request_display.
 		 */
 		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
-			int v, c, h = -EINVAL;
+			u8 cores[2];
+			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL;
 
+			cores[n++] = (usb4_core == 2) ? 2 : 1;
+			cores[n++] = (cores[0] == 1) ? 2 : 1;
 			mutex_lock(&dcp->hpd_mutex);
-			v = dptxport_validate_connection(
-				dcp->dptxport[port].service, 0, 0,
-				dcp->dptx_die);
-			dev_info(dcp->dev,
-				 "USB4: analog DPIN validate atc=0: %d\n", v);
-			c = -EINVAL;
-			if (!v)
+			for (i = 0; i < n; i++) {
+				u8 core = cores[i];
+
+				v = dptxport_validate_connection(
+					dcp->dptxport[port].service, core, 0,
+					dcp->dptx_die);
+				dev_info(dcp->dev,
+					 "USB4: analog DPIN validate core=%u atc=0: %d\n",
+					 core, v);
+				if (v)
+					continue;
 				c = dptxport_connect(dcp->dptxport[port].service,
-						     0, 0, dcp->dptx_die,
+						     core, 0, dcp->dptx_die,
 						     true);
-			dev_info(dcp->dev,
-				 "USB4: analog DPIN connect atc=0 HPD: %d\n",
-				 c);
-			if (!c)
-				h = dptxport_set_hpd(dcp->dptxport[port].service,
-						     true);
+				dev_info(dcp->dev,
+					 "USB4: analog DPIN connect core=%u atc=0 HPD: %d\n",
+					 core, c);
+				if (!c)
+					h = dptxport_set_hpd(
+						dcp->dptxport[port].service,
+						true);
+				dev_info(dcp->dev,
+					 "USB4: analog DPIN set_hpd: %d\n", h);
+				break;
+			}
 			mutex_unlock(&dcp->hpd_mutex);
-			dev_info(dcp->dev, "USB4: analog DPIN set_hpd: %d\n", h);
+			if (v)
+				dev_info(dcp->dev,
+					 "USB4: analog DPIN CORE 1 and 2 validate failed\n");
 		}
 		return 0;
 	}
