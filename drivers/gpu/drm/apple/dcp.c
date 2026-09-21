@@ -1481,6 +1481,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN set_hpd: %d\n", h);
 				if (!h) {
+					dev_info(dcp->dev,
+						 "USB4: before request_display nr_modes=%u valid_mode=%d\n",
+						 dcp->nr_modes, dcp->valid_mode);
 					r = dptxport_request_display(svc);
 					dev_info(dcp->dev,
 						 "USB4: analog DPIN request_display core=%u atc=%u: %d\n",
@@ -1494,7 +1497,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 					    dcp->active_typec_route->usb4_xbar) {
 						struct apple_dcp_typec_route *route =
 							dcp->active_typec_route;
-						int m, h2;
+						int m;
 
 						mux_control_deselect(route->usb4_xbar);
 						m = mux_control_select(route->usb4_xbar,
@@ -1503,21 +1506,10 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 							 "USB4: reselect dpin after nub: %d\n",
 							 m);
 						/*
-						 * Second set_hpd starts
-						 * DCPDPDevice. 0084 armed ATC
-						 * AUX and aborted this call
-						 * at 1s; firmware's start
-						 * timer is 5s and then 22/24.
-						 * No ATC AUX (that dropped
-						 * analog 0x1017 to 0x17).
-						 * Hold the call for 8s.
+						 * The post-request HPD retry was already
+						 * tested: the device timed out after 5s.
+						 * Keep only the pre-request HPD above.
 						 */
-						h2 = dptxport_set_hpd_timeout(svc,
-									      true,
-									      8000);
-						dev_info(dcp->dev,
-							 "USB4: set_hpd after nub 8s (DCPDPDevice): %d\n",
-							 h2);
 					}
 				}
 				break;

@@ -493,6 +493,13 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
 static struct dcp_read_edt_data_resp
 dcpep_cb_read_edt_data(struct apple_dcp *dcp, struct dcp_read_edt_data_req *req)
 {
+	/* Observe boot-property requests without inventing firmware timings. */
+	if (dcp->fixed_connector_type != DRM_MODE_CONNECTOR_eDP)
+		dev_info(dcp->dev,
+			 "read_edt_data key=%.*s count=%u default0=%#x ret=0\n",
+			 (int)sizeof(req->key), req->key, req->count,
+			 req->value[0]);
+
 	return (struct dcp_read_edt_data_resp){
 		.value[0] = req->value[0],
 		.ret = 0,
@@ -602,6 +609,12 @@ static u8 dcpep_cb_prop_end(struct apple_dcp *dcp,
 			    struct dcp_set_dcpav_prop_end_req *req)
 {
 	u8 resp = dcpep_process_chunks(dcp, req);
+
+	if (dcp->fixed_connector_type != DRM_MODE_CONNECTOR_eDP)
+		dev_info(dcp->dev,
+			 "DCP property key=%.*s bytes=%zu accepted=%u nr_modes=%u\n",
+			 (int)sizeof(req->key), req->key, dcp->chunks.length,
+			 resp, dcp->nr_modes);
 
 	/* move chunked data to connector to provide it via debugfs */
 	dcp_connector_update_dict(dcp->connector, req->key, &dcp->chunks);
