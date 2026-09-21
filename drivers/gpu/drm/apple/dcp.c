@@ -1427,6 +1427,22 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		dcp_usb4_enable_lpdptxphy(dcp);
 		dev_info(dcp->dev,
 			 "USB4: skip DPTX connect (echo 1 > usb4_dptx_train after lid close)\n");
+		/*
+		 * Analog PHY is up (+0x18=0x17). Ask firmware if a DPIN
+		 * remote port exists with ATC=0 (no lpdptxphy). Do not
+		 * connect, request_display, or set_hpd.
+		 */
+		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
+			int v;
+
+			mutex_lock(&dcp->hpd_mutex);
+			v = dptxport_validate_connection(
+				dcp->dptxport[port].service, 0, 0,
+				dcp->dptx_die);
+			mutex_unlock(&dcp->hpd_mutex);
+			dev_info(dcp->dev,
+				 "USB4: analog DPIN validate atc=0: %d\n", v);
+		}
 		return 0;
 	}
 	if (dcp_is_usb4_output(dcp))
