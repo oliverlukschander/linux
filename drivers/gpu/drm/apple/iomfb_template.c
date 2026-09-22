@@ -122,26 +122,32 @@ static u32 dcpep_cb_zero(struct apple_dcp *dcp)
 
 extern int apple_dpxbar_right_frame_snapshot(struct mux_control *mux);
 
-static void usb4_frame_snapshot(struct apple_dcp *dcp)
+static void right_frame_snapshot(struct apple_dcp *dcp)
 {
 	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	struct mux_control *mux;
 	int (*snapshot)(struct mux_control *mux);
+	bool usb4;
 	int ret;
 
 	if (!usb4_native_dpin || !dcp_usb4_protocol_probe_enabled() ||
-	    !dcp_is_usb4_output(dcp) || dcp->index != 2 || !route ||
-	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2 ||
-	    !route->usb4_xbar || dcp->usb4_frame_snapshot_done)
+	    dcp->index != 2 || !route ||
+	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2)
 		return;
-	dcp->usb4_frame_snapshot_done = true;
+	usb4 = dcp_is_usb4_output(dcp);
+	mux = usb4 ? route->usb4_xbar : route->xbar;
+	if (!mux || dcp->right_frame_snapshot_done[usb4])
+		return;
+	dcp->right_frame_snapshot_done[usb4] = true;
 	snapshot = symbol_get(apple_dpxbar_right_frame_snapshot);
 	if (!snapshot) {
-		dev_info(dcp->dev, "USB4 frame: crossbar snapshot unavailable\n");
+		dev_info(dcp->dev, "Right frame: crossbar snapshot unavailable\n");
 		return;
 	}
-	ret = snapshot(route->usb4_xbar);
+	ret = snapshot(mux);
 	symbol_put(apple_dpxbar_right_frame_snapshot);
-	dev_info(dcp->dev, "USB4 frame: crossbar snapshot result=%d\n", ret);
+	dev_info(dcp->dev, "Right frame: usb4=%u crossbar snapshot result=%d\n",
+		 usb4, ret);
 }
 
 static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
@@ -154,7 +160,7 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 	dcp->last_swap_id = resp->swap_id;
 
 	dcp_drm_crtc_page_flip(dcp, now);
-	usb4_frame_snapshot(dcp);
+	right_frame_snapshot(dcp);
 	if (dcp->crc_enabled) {
 		u32 crc32 = 0;
 		drm_crtc_add_crc_entry(&dcp->crtc->base, true, resp->swap_id, &crc32);

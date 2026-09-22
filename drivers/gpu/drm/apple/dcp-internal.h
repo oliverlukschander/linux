@@ -293,7 +293,7 @@ struct apple_dcp {
 	struct typec_mux *typec_mux;
 	struct apple_dcp_typec_route typec_routes[DCP_MAX_TYPEC_ROUTES];
 	struct apple_dcp_typec_route *active_typec_route;
-	bool usb4_frame_snapshot_done;
+	bool right_frame_snapshot_done[2];
 	u32 nr_typec_routes;
 	bool phy_managed_by_typec;
 	bool typec_cable_connected;
