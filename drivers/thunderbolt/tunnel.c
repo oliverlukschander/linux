@@ -111,6 +111,11 @@ module_param(dp_video_counter, bool, 0444);
 MODULE_PARM_DESC(dp_video_counter,
 		 "diagnostic: count packets on the DP video path's DP IN hop and its downstream (hub-side) hop (Apple j416s right ACIO route only; read via debugfs port counters); default: false");
 
+static bool dp_bw_grant;
+module_param(dp_bw_grant, bool, 0444);
+MODULE_PARM_DESC(dp_bw_grant,
+		 "grant the DP video path's non-reduced bandwidth immediately instead of the spec's initial 0, since this adapter has never been observed to send a bandwidth request notification (Apple j416s right ACIO route only); default: false");
+
 static void tb_dp_dump_apple(struct tb_tunnel *tunnel);
 static int tb_apple_nhi_typec_index(struct tb_nhi *nhi);
 
@@ -944,9 +949,30 @@ static int tb_dp_xchg_caps(struct tb_tunnel *tunnel)
 			     in->cap_adap + DP_REMOTE_CAP, 1);
 }
 
+/* Apple j416s right-hand ACIO DP IN adapter only; shared by the diagnostic
+ * packet counter and the bandwidth-grant workaround below.
+ */
+static bool tb_dp_is_apple_j416s_right_dpin(const struct tb_port *in)
+{
+	if (!tb_port_is_dpin(in))
+		return false;
+	if (!tb_nhi_is_apple(in->sw->tb->nhi))
+		return false;
+	if (!of_machine_is_compatible("apple,j416s"))
+		return false;
+
+	/* Right-hand USB-C ports only ("f01f" NHI); see tb_apple_nhi_typec_index(). */
+	return tb_apple_nhi_typec_index(in->sw->tb->nhi) == 2;
+}
+
+static bool tb_dp_apple_dpin_needs_bw_grant(const struct tb_port *in)
+{
+	return dp_bw_grant && tb_dp_is_apple_j416s_right_dpin(in);
+}
+
 static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)
 {
-	int ret, estimated_bw, granularity, tmp;
+	int ret, estimated_bw, granularity, tmp, non_reduced_bw;
 	struct tb_port *out = tunnel->dst_port;
 	struct tb_port *in = tunnel->src_port;
 	u32 out_dp_cap, out_rate, out_lanes;
@@ -986,6 +1012,7 @@ static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)
 	rate = min(in_rate, out_rate);
 	lanes = min(in_lanes, out_lanes);
 	tmp = tb_dp_bandwidth(rate, lanes);
+	non_reduced_bw = tmp;
 
 	tb_tunnel_dbg(tunnel, "non-reduced bandwidth %u Mb/s x%u = %u Mb/s\n",
 		      rate, lanes, tmp);
@@ -1037,8 +1064,21 @@ static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)
 	if (ret)
 		return ret;
 
-	/* Initial allocation should be 0 according the spec */
-	ret = usb4_dp_port_allocate_bandwidth(in, 0);
+	/*
+	 * Initial allocation should be 0 according the spec, which relies
+	 * on the DP IN adapter later raising it via a bandwidth request
+	 * notification. The Apple j416s right-hand ACIO DP IN adapter has
+	 * never been observed to generate that notification: 0102-0107 all
+	 * completed link training and a full DCP frame with this field
+	 * (DP_STATUS allocated-bandwidth) still reading 0 and no picture.
+	 * On that one route only, grant the already-computed non-reduced
+	 * bandwidth immediately, capped at what the connection manager
+	 * already reserved for this tunnel (estimated_bw), instead of
+	 * waiting indefinitely for a request that does not arrive.
+	 */
+	tmp = tb_dp_apple_dpin_needs_bw_grant(in) ?
+	      min(non_reduced_bw, estimated_bw) : 0;
+	ret = usb4_dp_port_allocate_bandwidth(in, tmp);
 	if (ret)
 		return ret;
 
@@ -1590,21 +1630,10 @@ static int tb_dp_init_video_credits(struct tb_path_hop *hop)
 
 static bool tb_dp_video_counter_wanted(const struct tb_path *path)
 {
-	struct tb_port *in;
-
 	if (!dp_video_counter || !path->path_length)
 		return false;
 
-	in = path->hops[0].in_port;
-	if (!tb_port_is_dpin(in))
-		return false;
-	if (!tb_nhi_is_apple(in->sw->tb->nhi))
-		return false;
-	if (!of_machine_is_compatible("apple,j416s"))
-		return false;
-
-	/* Right-hand USB-C ports only ("f01f" NHI); see tb_apple_nhi_typec_index(). */
-	return tb_apple_nhi_typec_index(in->sw->tb->nhi) == 2;
+	return tb_dp_is_apple_j416s_right_dpin(path->hops[0].in_port);
 }
 
 static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
