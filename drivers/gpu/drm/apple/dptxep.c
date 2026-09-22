@@ -475,14 +475,24 @@ dptxport_call_did_change_link_config(struct apple_epic_service *service)
 		 * without disconnecting it. Legacy probe-only builds retain the
 		 * old reselect. The DPIN handshake is cached by its owner.
 		 */
-		if (dptx->usb4_link_up_attempted)
+		if (dptx->usb4_link_up_attempted) {
+			/* A repeated completion does not require another hardware attempt. */
+			if (usb4_tunnel_clock && dptx->usb4_clock_phy &&
+			    dptx->usb4_link_up_rate == dptx->link_rate) {
+				dev_info(dcp->dev, "native DPIN0: repeated link-config rate=0x%x cached success\n",
+					 dptx->link_rate);
+				mdelay(10);
+				return 0;
+			}
 			return -EALREADY;
+		}
 		dptx->usb4_link_up_attempted = true;
 		ret = dptxport_native_dpin(service, true, usb4_tunnel_clock);
 		dev_info(dcp->dev, "native DPIN0: link-config up rate=0x%x result=%d\n",
 			 dptx->link_rate, ret);
 		if (ret)
 			return ret;
+		dptx->usb4_link_up_rate = dptx->link_rate;
 	}
 
 	/* assume the link config did change and wait a little bit */
@@ -559,6 +569,8 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 		}
 
 		dptx->link_rate = dptx->pending_link_rate = link_rate;
+		if (!link_rate)
+			dptx->usb4_link_up_rate = 0;
 
 	}
 
@@ -703,6 +715,7 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 	int ret = 0;
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
+	dptx->usb4_link_up_rate = 0;
 	if (dptx->usb4_clock_phy) {
 		int clock_ret = dptxport_tunnel_clock(service, 0);
 
