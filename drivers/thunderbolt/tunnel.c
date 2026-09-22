@@ -109,7 +109,7 @@ MODULE_PARM_DESC(bw_alloc_mode,
 static bool dp_video_counter;
 module_param(dp_video_counter, bool, 0444);
 MODULE_PARM_DESC(dp_video_counter,
-		 "diagnostic: count packets entering the DP video path's DP IN hop (Apple j416s right ACIO route only; read via debugfs port counters); default: false");
+		 "diagnostic: count packets on the DP video path's DP IN hop and its downstream (hub-side) hop (Apple j416s right ACIO route only; read via debugfs port counters); default: false");
 
 static void tb_dp_dump_apple(struct tb_tunnel *tunnel);
 static int tb_apple_nhi_typec_index(struct tb_nhi *nhi);
@@ -1619,9 +1619,23 @@ static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
 	path->weight = TB_DP_VIDEO_WEIGHT;
 
 	if (tb_dp_video_counter_wanted(path)) {
+		struct tb_path_hop *last = &path->hops[path->path_length - 1];
+
 		path->hops[0].in_counter_index = 0;
 		tb_port_dbg(path->hops[0].in_port,
 			   "dp_video_counter: enabling counter 0 on DP IN hop\n");
+
+		/*
+		 * Second checkpoint: the downstream router's ingress side of
+		 * the same path (e.g. the hub's upstream link), so a 0105/
+		 * 0106-style attach can show whether DP-IN traffic actually
+		 * crosses into the far end, not just leaves the host.
+		 */
+		if (last != &path->hops[0]) {
+			last->in_counter_index = 0;
+			tb_port_dbg(last->in_port,
+				   "dp_video_counter: enabling counter 0 on downstream hop\n");
+		}
 	}
 
 	tb_path_for_each_hop(path, hop) {
