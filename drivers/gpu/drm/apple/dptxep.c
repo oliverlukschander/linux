@@ -419,9 +419,33 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 	return 0;
 }
 
+static int dptxport_native_dpin(struct apple_epic_service *service, bool active);
+
 static int
 dptxport_call_did_change_link_config(struct apple_epic_service *service)
 {
+	struct apple_dcp *dcp = service->ep->dcp;
+	struct dptx_port *dptx = service->cookie;
+	int ret;
+
+	if (usb4_native_dpin && dcp_is_usb4_output(dcp) && dptx->link_rate) {
+		/*
+		 * Native ATCDP brings the connection up after setting a nonzero
+		 * link rate. ACTIVATE alone precedes that clock configuration.
+		 * Test one crossbar reselect at this boundary, using the same
+		 * guarded route and ACIO owner as ACTIVATE. The already-active
+		 * DPIN handshake is cached; this does not retrain or retry it.
+		 */
+		if (dptx->usb4_link_up_attempted)
+			return -EALREADY;
+		dptx->usb4_link_up_attempted = true;
+		ret = dptxport_native_dpin(service, true);
+		dev_info(dcp->dev, "native DPIN0: link-config up rate=0x%x result=%d\n",
+			 dptx->link_rate, ret);
+		if (ret)
+			return ret;
+	}
+
 	/* assume the link config did change and wait a little bit */
 	mdelay(10);
 

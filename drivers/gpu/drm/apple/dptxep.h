@@ -51,6 +51,7 @@ struct apple_epic_service;
 struct dptx_port {
 	bool enabled, connected;
 	bool usb4_inactive_sink;
+	bool usb4_link_up_attempted;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
 	struct completion usb4_lane_completion;
