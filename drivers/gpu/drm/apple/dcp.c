@@ -119,7 +119,7 @@ static bool usb4_force_dptx;
 static bool usb4_protocol_probe;
 module_param(usb4_protocol_probe, bool, 0444);
 MODULE_PARM_DESC(usb4_protocol_probe,
-		 "One USB4 typec0 protocol probe using target 0x8001, without a PHY");
+		 "One USB4 protocol probe without a PHY (native: right port)");
 bool usb4_native_dpin;
 module_param(usb4_native_dpin, bool, 0444);
 MODULE_PARM_DESC(usb4_native_dpin,
@@ -199,8 +199,17 @@ static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *rout
 	return false;
 }
 
+bool dcp_usb4_native_route(unsigned int typec_index)
+{
+	return usb4_native_dpin && usb4_protocol_probe && typec_index == 2;
+}
+
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 {
+	/* Match the fixed CRTC advertised for the bounded native experiment. */
+	if (dcp_usb4_native_route(route->typec_index) && route->dcp->index != 2)
+		return false;
+
 	return !route->dcp->active_typec_route &&
 	       !dcp_typec_route_fixed_output_busy(route);
 }
@@ -1439,11 +1448,12 @@ static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
 	struct apple_dcp_typec_route *route = dcp->active_typec_route;
 	struct dptx_port *dptx = &dcp->dptxport[port];
 	struct apple_epic_service *svc = dptx->service;
+	u8 atc = usb4_native_dpin ? 2 : 0;
 	int ret;
 
-	/* This probe is bounded to the confirmed left-back DP IN 0:5 route. */
+	/* Native test: right DPIN0; retain left-back for the protocol-only probe. */
 	if (!route || !route->usb4_selected || !route->usb4_xbar ||
-	    route->typec_index != 0 || port != 0 || usb4_dpin_index != 1 ||
+	    route->typec_index != atc || port != 0 || usb4_dpin_index != 1 ||
 	    dcp->index != 2 || dcp->dptx_die != 0 ||
 	    usb4_force_dptx || !dptx->enabled || !svc)
 		return -EINVAL;
@@ -1466,12 +1476,13 @@ static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
 	reinit_completion(&dptx->linkcfg_completion);
 	reinit_completion(&dptx->usb4_lane_completion);
 	dptx->lane_count = 0;
-	dev_info(dcp->dev, "USB4 protocol probe: target=0x8001, PHY absent, one attempt\n");
-	ret = dptxport_validate_connection(svc, 1, 0, dcp->dptx_die);
+	dev_info(dcp->dev, "USB4 protocol probe: target=0x%x typec%u, PHY absent, one attempt\n",
+		 0x8001 | (atc << 4), atc);
+	ret = dptxport_validate_connection(svc, 1, atc, dcp->dptx_die);
 	dev_info(dcp->dev, "USB4 protocol probe: validate=%d\n", ret);
 	if (ret)
 		goto out;
-	ret = dptxport_connect(svc, 1, 0, dcp->dptx_die, true);
+	ret = dptxport_connect(svc, 1, atc, dcp->dptx_die, true);
 	dev_info(dcp->dev, "USB4 protocol probe: connect=%d\n", ret);
 	if (ret)
 		goto out;

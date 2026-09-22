@@ -122,7 +122,7 @@
 /* J416s lab candidate: never enabled implicitly by a connected hub. */
 static bool dpin_native;
 module_param(dpin_native, bool, 0444);
-MODULE_PARM_DESC(dpin_native, "Opt-in J416s left-back native DP-IN handshake");
+MODULE_PARM_DESC(dpin_native, "Opt-in J416s right-port native DP-IN handshake");
 
 struct apple_cio {
 	struct device *dev;
@@ -1796,12 +1796,12 @@ static int apple_dpin_wait(void *ctx)
 	return 0;
 }
 
-int apple_usb4_dpin0_set_active(bool active);
-int apple_usb4_dpin0_set_active(bool active)
+int apple_usb4_right_dpin0_set_active(bool active);
+int apple_usb4_right_dpin0_set_active(bool active)
 {
 	struct resource res = {
-		.start = 0x701e50000ULL,
-		.end = 0x701e53fffULL,
+		.start = 0xf01e50000ULL,
+		.end = 0xf01e53fffULL,
 		.flags = IORESOURCE_MEM | IORESOURCE_MEM_NONPOSTED,
 		.name = "j416s-native-dpin0",
 	};
@@ -1819,7 +1819,7 @@ int apple_usb4_dpin0_set_active(bool active)
 
 	if (!dpin_native || !of_machine_is_compatible("apple,j416s"))
 		return -EOPNOTSUPP;
-	np = of_find_node_by_path("/soc/cio@701ac0000");
+	np = of_find_node_by_path("/soc/cio@f01ac0000");
 	if (!np)
 		return -ENODEV;
 	pdev = of_find_device_by_node(np);
@@ -1839,7 +1839,7 @@ int apple_usb4_dpin0_set_active(bool active)
 		goto unlock_device;
 	}
 	if (!acio->current_cable_info || !acio->nhi_pdev ||
-	    acio->rc_res->start != 0x701ac0000ULL)
+	    acio->rc_res->start != 0xf01ac0000ULL)
 		goto unlock_cio;
 	if (active == acio->dpin_active) {
 		ret = 0;
@@ -1875,7 +1875,7 @@ put:
 	put_device(&pdev->dev);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
+EXPORT_SYMBOL_GPL(apple_usb4_right_dpin0_set_active);
 
 static struct platform_driver * const apple_cio_drivers[] = {
 	&apple_nhi_driver,

@@ -549,7 +549,7 @@ static int dptxport_call_set_tiled_display_hint(void *reply_,
 }
 
 /* Optional symbol: keep the default DRM module independent of USB4. */
-extern int apple_usb4_dpin0_set_active(bool active);
+extern int apple_usb4_right_dpin0_set_active(bool active);
 
 static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
 {
@@ -561,13 +561,13 @@ static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
 
 	if (!dcp_usb4_protocol_probe_enabled() || !route ||
 	    !route->usb4_selected || !route->usb4_xbar ||
-	    route->typec_index != 0 || route->mux_index != 2 ||
+	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2 ||
 	    dcp->index != 2 || !of_machine_is_compatible("apple,j416s") ||
 	    dcp->dptx_die != 0 || dptx->unit != 0 ||
 	    dcp->fw_compat != DCP_FIRMWARE_V_13_5 ||
 	    usb4_dpin_index != 1 || dptx->atcphy)
 		return -EINVAL;
-	set_active = symbol_get(apple_usb4_dpin0_set_active);
+	set_active = symbol_get(apple_usb4_right_dpin0_set_active);
 	if (!set_active)
 		return -EOPNOTSUPP;
 	if (active) {
@@ -579,7 +579,7 @@ static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
 	}
 	ret = set_active(active);
 out:
-	symbol_put(apple_usb4_dpin0_set_active);
+	symbol_put(apple_usb4_right_dpin0_set_active);
 	dev_info(dcp->dev, "native DPIN0: DCP active=%u result=%d\n", active, ret);
 	return ret;
 }

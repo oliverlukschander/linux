@@ -466,6 +466,15 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 		INIT_WORK(&connector->hotplug_wq, dcp_hotplug);
 
 		for (i = 0; i < num_dcp; i++) {
+			struct apple_dcp *candidate = platform_get_drvdata(dcp[i]);
+
+			/*
+			 * Userspace caches possible_crtcs before the hub is attached.
+			 * The native test owns dcpext1; advertise only that CRTC
+			 * from registration, not a wider mask narrowed at hotplug.
+			 */
+			if (dcp_usb4_native_route(idx) && candidate->index != 2)
+				continue;
 			if (dcp_typec_port_has_candidate(idx, dcp[i]))
 				mask |= crtc_mask[i];
 		}
