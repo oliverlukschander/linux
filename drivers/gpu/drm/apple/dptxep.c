@@ -458,7 +458,7 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 	return 0;
 }
 
-static int dptxport_native_dpin(struct apple_epic_service *service, bool active);
+static int dptxport_native_dpin(struct apple_epic_service *service, bool active, bool bring_up);
 
 static int
 dptxport_call_did_change_link_config(struct apple_epic_service *service)
@@ -471,14 +471,14 @@ dptxport_call_did_change_link_config(struct apple_epic_service *service)
 		/*
 		 * Native ATCDP brings the connection up after setting a nonzero
 		 * link rate. ACTIVATE alone precedes that clock configuration.
-		 * Test one crossbar reselect at this boundary, using the same
-		 * guarded route and ACIO owner as ACTIVATE. The already-active
-		 * DPIN handshake is cached; this does not retrain or retry it.
+		 * With tunnel clocks configured, bring up the selected crossbar
+		 * without disconnecting it. Legacy probe-only builds retain the
+		 * old reselect. The DPIN handshake is cached by its owner.
 		 */
 		if (dptx->usb4_link_up_attempted)
 			return -EALREADY;
 		dptx->usb4_link_up_attempted = true;
-		ret = dptxport_native_dpin(service, true);
+		ret = dptxport_native_dpin(service, true, usb4_tunnel_clock);
 		dev_info(dcp->dev, "native DPIN0: link-config up rate=0x%x result=%d\n",
 			 dptx->link_rate, ret);
 		if (ret)
@@ -619,8 +619,9 @@ static int dptxport_call_set_tiled_display_hint(void *reply_,
 
 /* Optional symbol: keep the default DRM module independent of USB4. */
 extern int apple_usb4_right_dpin0_set_active(bool active);
+extern int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux);
 
-static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
+static int dptxport_native_dpin(struct apple_epic_service *service, bool active, bool bring_up)
 {
 	struct apple_dcp *dcp = service->ep->dcp;
 	struct apple_dcp_typec_route *route = dcp->active_typec_route;
@@ -639,7 +640,23 @@ static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
 	set_active = symbol_get(apple_usb4_right_dpin0_set_active);
 	if (!set_active)
 		return -EOPNOTSUPP;
-	if (active) {
+	if (active && bring_up) {
+		int (*up)(struct mux_control *mux);
+
+		if (!usb4_tunnel_clock || !dptx->usb4_clock_phy || !dptx->link_rate) {
+			ret = -EINVAL;
+			goto out;
+		}
+		up = symbol_get(apple_dpxbar_right_dpin0_bring_up);
+		if (!up) {
+			ret = -EOPNOTSUPP;
+			goto out;
+		}
+		ret = up(route->usb4_xbar);
+		symbol_put(apple_dpxbar_right_dpin0_bring_up);
+		if (ret)
+			goto out;
+	} else if (active) {
 		/* macOS connects the crossbar here, after DCP power/reset. */
 		mux_control_deselect(route->usb4_xbar);
 		ret = mux_control_select(route->usb4_xbar, route->mux_index);
@@ -664,7 +681,7 @@ dptxport_call_activate(struct apple_epic_service *service,
 
 	/* The native USB4 candidate must never configure a physical DP PHY. */
 	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		ret = dptxport_native_dpin(service, true);
+		ret = dptxport_native_dpin(service, true, false);
 	else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
@@ -693,7 +710,7 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 			dev_warn(dcp->dev, "USB4 tunnel clock cleanup failed: %d\n", clock_ret);
 	}
 	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		ret = dptxport_native_dpin(service, false);
+		ret = dptxport_native_dpin(service, false, false);
 	else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
