@@ -106,7 +106,13 @@ module_param(bw_alloc_mode, bool, 0444);
 MODULE_PARM_DESC(bw_alloc_mode,
 		 "enable bandwidth allocation mode if supported (default: true)");
 
+static bool dp_video_counter;
+module_param(dp_video_counter, bool, 0444);
+MODULE_PARM_DESC(dp_video_counter,
+		 "diagnostic: count packets entering the DP video path's DP IN hop (Apple j416s right ACIO route only; read via debugfs port counters); default: false");
+
 static void tb_dp_dump_apple(struct tb_tunnel *tunnel);
+static int tb_apple_nhi_typec_index(struct tb_nhi *nhi);
 
 static bool tb_nhi_is_apple(const struct tb_nhi *nhi)
 {
@@ -1582,6 +1588,25 @@ static int tb_dp_init_video_credits(struct tb_path_hop *hop)
 	return 0;
 }
 
+static bool tb_dp_video_counter_wanted(const struct tb_path *path)
+{
+	struct tb_port *in;
+
+	if (!dp_video_counter || !path->path_length)
+		return false;
+
+	in = path->hops[0].in_port;
+	if (!tb_port_is_dpin(in))
+		return false;
+	if (!tb_nhi_is_apple(in->sw->tb->nhi))
+		return false;
+	if (!of_machine_is_compatible("apple,j416s"))
+		return false;
+
+	/* Right-hand USB-C ports only ("f01f" NHI); see tb_apple_nhi_typec_index(). */
+	return tb_apple_nhi_typec_index(in->sw->tb->nhi) == 2;
+}
+
 static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
 {
 	struct tb_path_hop *hop;
@@ -1592,6 +1617,12 @@ static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
 	path->ingress_shared_buffer = TB_PATH_NONE;
 	path->priority = TB_DP_VIDEO_PRIORITY;
 	path->weight = TB_DP_VIDEO_WEIGHT;
+
+	if (tb_dp_video_counter_wanted(path)) {
+		path->hops[0].in_counter_index = 0;
+		tb_port_dbg(path->hops[0].in_port,
+			   "dp_video_counter: enabling counter 0 on DP IN hop\n");
+	}
 
 	tb_path_for_each_hop(path, hop) {
 		int ret;
