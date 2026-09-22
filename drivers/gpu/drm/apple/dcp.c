@@ -120,6 +120,10 @@ static bool usb4_protocol_probe;
 module_param(usb4_protocol_probe, bool, 0444);
 MODULE_PARM_DESC(usb4_protocol_probe,
 		 "One USB4 typec0 protocol probe using target 0x8001, without a PHY");
+bool usb4_native_dpin;
+module_param(usb4_native_dpin, bool, 0444);
+MODULE_PARM_DESC(usb4_native_dpin,
+		 "Opt-in native DP-IN ACTIVATE handshake; requires usb4_protocol_probe");
 static atomic_t usb4_protocol_probe_started = ATOMIC_INIT(0);
 
 bool dcp_usb4_protocol_probe_enabled(void)
@@ -1479,6 +1483,10 @@ static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
 	/* Record ownership so ordinary unplug releases this request. */
 	dptx->connected = true;
 
+	/* Native candidate reselects inside ACTIVATE before the DP-IN handshake. */
+	if (usb4_native_dpin)
+		goto assert_hpd;
+
 	/* Retain the existing post-reset crossbar selection for this comparison. */
 	mux_control_deselect(route->usb4_xbar);
 	ret = mux_control_select(route->usb4_xbar, route->mux_index);
@@ -1486,9 +1494,10 @@ static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
 	if (ret)
 		goto out;
 
+assert_hpd:
 	/* One HPD assertion, after power, as in the working physical DP path. */
 	ret = dptxport_set_hpd_timeout(svc, true, 8000);
-	dev_info(dcp->dev, "USB4 protocol probe: HPD=%d lanes=%u modes=%u\n",
+	dev_info(dcp->dev, "USB4 protocol probe: HPD=%d cached_lanes=%u modes=%u\n",
 		 ret, dptx->lane_count, dcp->nr_modes);
 out:
 	mutex_unlock(&dcp->hpd_mutex);

@@ -548,6 +548,42 @@ static int dptxport_call_set_tiled_display_hint(void *reply_,
 	return 0;
 }
 
+/* Optional symbol: keep the default DRM module independent of USB4. */
+extern int apple_usb4_dpin0_set_active(bool active);
+
+static int dptxport_native_dpin(struct apple_epic_service *service, bool active)
+{
+	struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	struct dptx_port *dptx = service->cookie;
+	int (*set_active)(bool active);
+	int ret;
+
+	if (!dcp_usb4_protocol_probe_enabled() || !route ||
+	    !route->usb4_selected || !route->usb4_xbar ||
+	    route->typec_index != 0 || route->mux_index != 2 ||
+	    dcp->index != 2 || !of_machine_is_compatible("apple,j416s") ||
+	    dcp->dptx_die != 0 || dptx->unit != 0 ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_13_5 ||
+	    usb4_dpin_index != 1 || dptx->atcphy)
+		return -EINVAL;
+	set_active = symbol_get(apple_usb4_dpin0_set_active);
+	if (!set_active)
+		return -EOPNOTSUPP;
+	if (active) {
+		/* macOS connects the crossbar here, after DCP power/reset. */
+		mux_control_deselect(route->usb4_xbar);
+		ret = mux_control_select(route->usb4_xbar, route->mux_index);
+		if (ret)
+			goto out;
+	}
+	ret = set_active(active);
+out:
+	symbol_put(apple_usb4_dpin0_set_active);
+	dev_info(dcp->dev, "native DPIN0: DCP active=%u result=%d\n", active, ret);
+	return ret;
+}
+
 static int
 dptxport_call_activate(struct apple_epic_service *service,
 		       const void *data, size_t data_size,
@@ -555,18 +591,18 @@ dptxport_call_activate(struct apple_epic_service *service,
 {
 	struct dptx_port *dptx = service->cookie;
 	struct apple_dcp *dcp = service->ep->dcp;
+	int ret = 0;
 
-	/*
-	 * Standalone PHYs need DCP input selection. USB4 keeps ATC lanes
-	 * in USB4 and only enables lpdptx AUX (phy-apple-atc set_mode).
-	 */
-	if (dptx->atcphy &&
+	/* The native USB4 candidate must never configure a physical DP PHY. */
+	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
+		ret = dptxport_native_dpin(service, true);
+	else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
-		memset(reply, 0, 4);
+		*(__le32 *)reply = cpu_to_le32(ret ? 1 : 0);
 
 	return 0;
 }
@@ -577,16 +613,19 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 		       void *reply, size_t reply_size)
 {
 	struct dptx_port *dptx = service->cookie;
-	const struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp *dcp = service->ep->dcp;
+	int ret = 0;
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
-	if (dptx->atcphy &&
+	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
+		ret = dptxport_native_dpin(service, false);
+	else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
-		memset(reply, 0, 4);
+		*(__le32 *)reply = cpu_to_le32(ret ? 1 : 0);
 
 	return 0;
 }

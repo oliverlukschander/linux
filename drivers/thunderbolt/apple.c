@@ -77,6 +77,7 @@
 #include <linux/usb/typec_tbt.h>
 #include <linux/workqueue.h>
 
+#include "apple-dpin-handshake.h"
 #include "nhi.h"
 #include "tb.h"
 
@@ -118,6 +119,11 @@
 #define TB_VSE_CAP_APPLE_CABLE_INFO_LEGACY_ADAPTER BIT(9)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_TBT2_3 BIT(10)
 
+/* J416s lab candidate: never enabled implicitly by a connected hub. */
+static bool dpin_native;
+module_param(dpin_native, bool, 0444);
+MODULE_PARM_DESC(dpin_native, "Opt-in J416s left-back native DP-IN handshake");
+
 struct apple_cio {
 	struct device *dev;
 	struct device_node *np;
@@ -129,6 +135,9 @@ struct apple_cio {
 	void __iomem *rc_base;
 	struct resource *rc_res;
 	struct apple_tunable *rc_tunable;
+	void __iomem *dpin_base;
+	bool dpin_attempted;
+	bool dpin_active;
 
 	struct resource *sram_res;
 	void __iomem *sram_base;
@@ -1431,6 +1440,7 @@ static void apple_cio_stop(struct apple_cio *acio)
 		dev_pm_syscore_device(acio->pd_list->pd_devs[i], false);
 	}
 
+	acio->dpin_active = false;
 	acio->current_cable_info = 0;
 }
 
@@ -1751,6 +1761,121 @@ static struct platform_driver apple_cio_driver = {
 	.probe = apple_cio_probe,
 	.remove = apple_cio_remove,
 };
+
+/*
+ * Native 13.5 AppleATCDPINAdapterPort, independently observed offline.
+ * Fixed resource comes from this machine's native ADT, not an RC offset.
+ * This is a bounded lab candidate, not a general DP-IN platform binding.
+ */
+struct apple_dpin_poll {
+	void __iomem *base;
+	unsigned long deadline;
+};
+
+static unsigned int apple_dpin_read(void *ctx, unsigned int offset)
+{
+	struct apple_dpin_poll *poll = ctx;
+
+	return readl(poll->base + offset);
+}
+
+static void apple_dpin_write(void *ctx, unsigned int offset, unsigned int value)
+{
+	struct apple_dpin_poll *poll = ctx;
+
+	writel(value, poll->base + offset);
+}
+
+static int apple_dpin_wait(void *ctx)
+{
+	struct apple_dpin_poll *poll = ctx;
+
+	if (time_after_eq(jiffies, poll->deadline))
+		return -ETIMEDOUT;
+	usleep_range(1000, 2000);
+	return 0;
+}
+
+int apple_usb4_dpin0_set_active(bool active);
+int apple_usb4_dpin0_set_active(bool active)
+{
+	struct resource res = {
+		.start = 0x701e50000ULL,
+		.end = 0x701e53fffULL,
+		.flags = IORESOURCE_MEM | IORESOURCE_MEM_NONPOSTED,
+		.name = "j416s-native-dpin0",
+	};
+	struct apple_dpin_poll poll;
+	struct apple_dpin_io io = {
+		.read = apple_dpin_read,
+		.write = apple_dpin_write,
+		.wait = apple_dpin_wait,
+		.ctx = &poll,
+	};
+	struct platform_device *pdev;
+	struct device_node *np;
+	struct apple_cio *acio;
+	int ret = -ENODEV;
+
+	if (!dpin_native || !of_machine_is_compatible("apple,j416s"))
+		return -EOPNOTSUPP;
+	np = of_find_node_by_path("/soc/cio@701ac0000");
+	if (!np)
+		return -ENODEV;
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return -ENODEV;
+	/* Fail rather than wait behind unbind or a cable power transition. */
+	if (!device_trylock(&pdev->dev)) {
+		ret = -EBUSY;
+		goto put;
+	}
+	if (pdev->dev.driver != &apple_cio_driver.driver)
+		goto unlock_device;
+	acio = platform_get_drvdata(pdev);
+	if (!acio || !mutex_trylock(&acio->lock)) {
+		ret = -EBUSY;
+		goto unlock_device;
+	}
+	if (!acio->current_cable_info || !acio->nhi_pdev ||
+	    acio->rc_res->start != 0x701ac0000ULL)
+		goto unlock_cio;
+	if (active == acio->dpin_active) {
+		ret = 0;
+		goto unlock_cio;
+	}
+	if (active && acio->dpin_attempted) {
+		ret = -EALREADY;
+		goto unlock_cio;
+	}
+	if (active)
+		acio->dpin_attempted = true;
+	if (!acio->dpin_base) {
+		acio->dpin_base = devm_ioremap_resource(&pdev->dev, &res);
+		if (IS_ERR(acio->dpin_base)) {
+			ret = PTR_ERR(acio->dpin_base);
+			acio->dpin_base = NULL;
+			goto unlock_cio;
+		}
+	}
+	poll.base = acio->dpin_base;
+	poll.deadline = jiffies + msecs_to_jiffies(1000);
+	dev_info(acio->dev, "native DPIN0: active=%u base=%pa, CONTROL=0x0c ACK=0x10\n",
+		 active, &res.start);
+	ret = apple_dpin_handshake(&io, active);
+	if (!ret)
+		acio->dpin_active = active;
+	dev_info(acio->dev, "native DPIN0: active=%u handshake=%d\n", active, ret);
+unlock_cio:
+	mutex_unlock(&acio->lock);
+unlock_device:
+	device_unlock(&pdev->dev);
+put:
+	put_device(&pdev->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
 
 static struct platform_driver * const apple_cio_drivers[] = {
 	&apple_nhi_driver,
