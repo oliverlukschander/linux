@@ -59,6 +59,7 @@ struct dptx_port {
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;
 	struct phy *atcphy;
+	struct phy *usb4_clock_phy;
 	struct mux_control *mux;
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;

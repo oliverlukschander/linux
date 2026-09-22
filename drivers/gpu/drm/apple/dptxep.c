@@ -20,6 +20,45 @@ MODULE_PARM_DESC(usb4_target_or,
 #include "parser.h"
 #include "trace.h"
 
+static bool usb4_tunnel_clock;
+module_param(usb4_tunnel_clock, bool, 0444);
+MODULE_PARM_DESC(usb4_tunnel_clock, "Opt-in native right DPIN0 clock configuration");
+
+extern int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
+
+static int dptxport_tunnel_clock(struct apple_epic_service *service, u8 rate)
+{
+	struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	struct dptx_port *dptx = service->cookie;
+	int (*configure)(struct phy *phy, u8 rate);
+	struct phy *phy = dptx->usb4_clock_phy;
+	int ret;
+
+	if (!usb4_tunnel_clock)
+		return 0;
+	if (rate) {
+		if (!usb4_native_dpin || !dcp_usb4_protocol_probe_enabled() ||
+		    !route || !route->usb4_selected || !route->phy ||
+		    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2 ||
+		    dcp->index != 2 || dptx->unit != 0 || dcp->dptx_die != 0 ||
+		    dcp->fw_compat != DCP_FIRMWARE_V_13_5 || usb4_dpin_index != 1)
+			return -EINVAL;
+		phy = route->phy;
+	}
+	if (!phy)
+		return 0;
+	configure = symbol_get(apple_atc_right_usb4_tunnel_rate);
+	if (!configure)
+		return -EOPNOTSUPP;
+	ret = configure(phy, rate);
+	symbol_put(apple_atc_right_usb4_tunnel_rate);
+	if (!ret)
+		dptx->usb4_clock_phy = rate ? phy : NULL;
+	dev_info(dcp->dev, "USB4 tunnel clock callback: rate=0x%x result=%d\n", rate, ret);
+	return ret;
+}
+
 struct dcpdptx_connection_cmd {
 	__le32 unk;
 	__le32 target;
@@ -504,6 +543,12 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 	}
 
 	if (phy_set_rate) {
+		if (dcp_is_usb4_output(service->ep->dcp) ||
+		    (!link_rate && dptx->usb4_clock_phy)) {
+			ret = dptxport_tunnel_clock(service, link_rate);
+			if (ret)
+				return ret;
+		}
 		dptx->phy_ops.dp.link_rate = phy_link_rate;
 		dptx->phy_ops.dp.set_rate = 1;
 
@@ -641,6 +686,12 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 	int ret = 0;
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
+	if (dptx->usb4_clock_phy) {
+		int clock_ret = dptxport_tunnel_clock(service, 0);
+
+		if (clock_ret)
+			dev_warn(dcp->dev, "USB4 tunnel clock cleanup failed: %d\n", clock_ret);
+	}
 	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
 		ret = dptxport_native_dpin(service, false);
 	else if (dptx->atcphy &&
