@@ -23,6 +23,33 @@
  */
 #define APPLE_DPIN_CONNECTED (1U << 1)
 
+/*
+ * Two further offsets native AppleCIODPTX::bringConnectionUp writes on
+ * this exact DPIN0 block, in between the HPD and CONTROL writes above
+ * (native order: HPD, then MODE_B, then MODE_A, then CONTROL). Unlike
+ * CONNECTED, the exact values here are NOT confirmed from the native
+ * binary: native computes them from a per-connection attributes value
+ * (rate class and an unidentified secondary field) that is copied
+ * verbatim from this connection's negotiation and is not itself built
+ * anywhere in the traced kernel/kext code -- its origin could not be
+ * pinned down statically. MODE_VALUE below is therefore an informed,
+ * explicitly-labeled estimate, not a confirmed constant:
+ *   - bits 4-7 of the field select a rate class using the same RBR=0/
+ *     HBR=1/HBR2=2/HBR3=3 ordinal already used elsewhere in this driver
+ *     (drivers/thunderbolt/tb_regs.h DP_COMMON_CAP_RATE_*); this link
+ *     negotiates HBR2, so 2.
+ *   - a secondary bit, native-gated on lane_count>=2 (true here: 4) and
+ *     on the same "which DPIN0 sub-instance" selector already confirmed
+ *     unconditional-0 for this single, non-split port, is set from a
+ *     nearby field that other native code also treats as a small
+ *     enumeration; the closest available reading of it for a 4-lane
+ *     link resolves to that bit being set (1).
+ * MODE_VALUE = rate_class(2) * lane_count(4) + secondary_bit(1) = 9.
+ */
+#define APPLE_DPIN_MODE_A 0x14
+#define APPLE_DPIN_MODE_B 0x1c
+#define APPLE_DPIN_MODE_VALUE 9U
+
 /* Caller owns powered register access and provides a bounded wait. */
 struct apple_dpin_io {
 	unsigned int (*read)(void *ctx, unsigned int offset);
@@ -47,8 +74,22 @@ static inline int apple_dpin_handshake(const struct apple_dpin_io *io,
 	saved = io->read(io->ctx, APPLE_DPIN_CONTROL);
 	if (saved == ~0U)
 		return -EIO;
-	if (active)
+	if (active) {
+		unsigned int mode_a, mode_b;
+
 		io->write(io->ctx, APPLE_DPIN_HPD, hpd | APPLE_DPIN_CONNECTED);
+
+		mode_b = io->read(io->ctx, APPLE_DPIN_MODE_B);
+		if (mode_b != ~0U)
+			io->write(io->ctx, APPLE_DPIN_MODE_B,
+				  mode_b | (APPLE_DPIN_MODE_VALUE << 7));
+
+		mode_a = io->read(io->ctx, APPLE_DPIN_MODE_A);
+		if (mode_a != ~0U)
+			io->write(io->ctx, APPLE_DPIN_MODE_A,
+				  (mode_a & ~0xffU) |
+				  (1U << APPLE_DPIN_MODE_VALUE));
+	}
 	value = active ? (saved & ~APPLE_DPIN_INACTIVE) | APPLE_DPIN_CONNECTED :
 			 saved | APPLE_DPIN_INACTIVE;
 	io->write(io->ctx, APPLE_DPIN_CONTROL, value);
