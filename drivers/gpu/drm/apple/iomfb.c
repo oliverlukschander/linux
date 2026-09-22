@@ -563,6 +563,13 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
 	 * re-runs the modeset, which marks the mode valid again, before the
 	 * firmware has reported the display back.
 	 */
+	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
+		dev_info_once(dcp->dev,
+			      "USB4 frame: flush entry valid=%u connected=%u busy=%u\n",
+			      dcp->valid_mode,
+			      dcp->connector && dcp->connector->connected,
+			      dcp_channel_busy(&dcp->ch_cmd));
+
 	if (!dcp->valid_mode || !dcp->connector || !dcp->connector->connected) {
 		schedule_work(&dcp->vblank_wq);
 		return;
