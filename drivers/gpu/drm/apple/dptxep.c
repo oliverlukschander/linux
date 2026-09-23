@@ -25,20 +25,6 @@ module_param(usb4_tunnel_clock, bool, 0444);
 MODULE_PARM_DESC(usb4_tunnel_clock, "Opt-in native right DPIN0 clock configuration");
 
 extern int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
-extern int apple_atc_usb4_enable_dp_aux(struct phy *phy);
-
-int dptxport_usb4_enable_dp_aux(struct phy *phy)
-{
-	int (*enable)(struct phy *phy);
-	int ret;
-
-	enable = symbol_get(apple_atc_usb4_enable_dp_aux);
-	if (!enable)
-		return -EOPNOTSUPP;
-	ret = enable(phy);
-	symbol_put(apple_atc_usb4_enable_dp_aux);
-	return ret;
-}
 
 static int dptxport_tunnel_clock(struct apple_epic_service *service, u8 rate)
 {
@@ -606,19 +592,12 @@ static int dptxport_call_get_supports_hpd(struct apple_epic_service *service,
 
 	reply->retcode = cpu_to_le32(0);
 	/*
-	 * Denying HPD here once regressed to DEVICE_NOT_STARTED (~5.5s)
-	 * on the USB4 analog-DPIN path when no real PHY was attached to
-	 * answer the link-training APCALLs that follow. That path now
-	 * attaches route->phy before connect() when available (see the
-	 * analog-DPIN block in dcp_dptx_connect()) and passes a matching
-	 * supports_hpd=false to dptxport_connect() -- this reply must
-	 * agree with that same decision instead of unconditionally
-	 * claiming HPD support for every Type-C/USB4 target, or DCP
-	 * firmware's two independent "does the AP handle HPD" signals
-	 * (this APCALL and connect()'s own payload bit) disagree.
+	 * Analog DPIN CORE=1 already uses AFK set_hpd (returns 0).
+	 * Denying HPD here made request_display ACTIVATE then 22/24
+	 * DEVICE_NOT_STARTED (~5.5s). Advertise HPD so firmware uses
+	 * that path instead of waiting for a PHY start.
 	 */
-	reply->supported = cpu_to_le32((dcp_is_typec_output(dcp) &&
-					!dcp_is_usb4_output(dcp)) ? 1 : 0);
+	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp) ? 1 : 0);
 	dev_info(dcp->dev, "DPTXPort: GET_SUPPORTS_HPD %u usb4=%d\n",
 		 le32_to_cpu(reply->supported), dcp_is_usb4_output(dcp));
 	return 0;
@@ -729,26 +708,27 @@ dptxport_call_activate(struct apple_epic_service *service,
 	/* The native USB4 candidate must never configure a physical DP PHY. */
 	if (usb4_native_dpin && dcp_is_usb4_output(dcp)) {
 		/*
-		 * 0114 called dptxport_request_display() (a blocking
-		 * afk_service_call()) from right here -- but this function
-		 * runs as service->ops->call(), dispatched inline on
-		 * afkep->wq, which is an *ordered* workqueue (afk.c). That
-		 * queue is also what runs the work item that completes any
-		 * outbound afk_service_call(), including this one and the
-		 * pre-existing outer request_display() call in
-		 * dcp_dptx_connect() that's still pending when DCP sends us
-		 * this very ACTIVATE APCALL. A call issued from here can
-		 * never observe its own completion (nothing else can run on
-		 * this queue until this handler returns), so it always times
-		 * out after exactly one second -- and it delays the ACTIVATE
-		 * reply DCP is waiting on by that same second, which starves
-		 * the outer call's own independent timeout too. See
-		 * notes/2026-09-23-0114-deadlock-found.md. Do only the
-		 * hardware activation here and return immediately, so the
-		 * outer request_display() call gets an uncontended chance to
-		 * receive DCP's real reply.
+		 * Do NOT bring up the crossbar/native DPIN0 handshake here.
+		 * A real, hardware-validated reference implementation of the
+		 * equivalent Thunderbolt DP tunnel mechanism on a different
+		 * SoC (aurora-silicon/linux#8, tested on t8103) confirmed
+		 * this must wait until DCP has actually set a real link
+		 * rate: its Activate handler only wakes the DP IN adapter,
+		 * and defers the crossbar mux selection to
+		 * DidChangeLinkConfiguration, gated on a link rate already
+		 * being set by SetLinkRate. dptxport_call_did_change_link_config()
+		 * below already does exactly this, already correctly gated
+		 * on dptx->link_rate ("ACTIVATE alone precedes clock
+		 * configuration" -- see its own comment). Bringing up the
+		 * crossbar eagerly here, before any pixel clock exists,
+		 * leaves it routing a real analog signal path with nothing
+		 * valid behind it -- consistent with everything observed
+		 * this session: DCP's own AUX probe finds nothing coherent
+		 * (INACTIVE_SINK_DETECTED) and never proceeds to
+		 * SET_LINK_RATE, so dptxport_tunnel_clock() (already wired
+		 * up in dptxport_call_set_link_rate() for this exact case)
+		 * never even gets a chance to run.
 		 */
-		ret = dptxport_native_dpin(service, true, false);
 	} else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);

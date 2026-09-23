@@ -1596,24 +1596,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			 * the shared lpdptxphy that also drives eDP).
 			 */
 			if (have_phy) {
-				int aux_ret;
-
 				dcp->dptxport[bind].atcphy = dp_route->phy;
 				phy_set_mode_ext(dp_route->phy, PHY_MODE_DP,
 						 dcp->index);
-				/*
-				 * atcphy_modes[APPLE_ATCPHY_MODE_USB4].enable_dp_aux
-				 * is false, so nothing so far has powered up the
-				 * AUX sub-block on this PHY -- DCP's own AUX probe
-				 * of the downstream sink has nothing to actually
-				 * talk to. Enable it directly, without a full mode
-				 * transition, so the USB4 tunnel's own SS lane/
-				 * crossbar state is left untouched.
-				 */
-				aux_ret = dptxport_usb4_enable_dp_aux(dp_route->phy);
-				dev_info(dcp->dev,
-					 "USB4: enable DP AUX on route->phy: %d\n",
-					 aux_ret);
 			}
 			mutex_lock(&dcp->hpd_mutex);
 			for (i = 0; i < n; i++) {
@@ -1629,7 +1614,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 				if (v)
 					continue;
 				c = dptxport_connect(svc, core, atc,
-						     dcp->dptx_die, !have_phy);
+						     dcp->dptx_die, true);
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN connect core=%u atc=%u HPD: %d\n",
 					 core, atc, c);

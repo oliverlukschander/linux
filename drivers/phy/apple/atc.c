@@ -2378,42 +2378,6 @@ int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate)
 }
 EXPORT_SYMBOL_GPL(apple_atc_right_usb4_tunnel_rate);
 
-/*
- * atcphy_modes[APPLE_ATCPHY_MODE_USB4].enable_dp_aux is false, so the
- * normal atcphy_set_mode() path never powers up the DP AUX sub-block
- * (the separate "lpdptx" register block, distinct from the USB4
- * SS/crossbar/lane_mode state atcphy_set_mode() otherwise programs) for
- * a USB4-tunneled connection. Without it, DCP firmware's own AUX probe
- * of the downstream sink has nothing to actually communicate over --
- * consistent with DCP reaching INACTIVE_SINK_DETECTED (it tries) but
- * never proceeding to SET_LINK_RATE (the sink never responds). Call
- * atcphy_enable_dp_aux() directly here, without going through a full
- * mode transition, so the USB4 tunnel's own SS lane/crossbar state
- * (and any other traffic already flowing over this PHY, e.g. the
- * tunnel's USB3/USB2 fabric) is left untouched.
- */
-int apple_atc_usb4_enable_dp_aux(struct phy *phy);
-int apple_atc_usb4_enable_dp_aux(struct phy *phy)
-{
-	struct apple_atcphy *atcphy;
-
-	if (!phy || phy->ops != &apple_atc_dp_phy_ops ||
-	    !of_machine_is_compatible("apple,j416s"))
-		return -EOPNOTSUPP;
-	atcphy = phy_get_drvdata(phy);
-	if (!of_device_is_compatible(atcphy->np, "apple,t6020-atcphy") ||
-	    !apple_atc_is_typec_core(atcphy->res.core->start) ||
-	    resource_size(atcphy->res.core) < 0x7048)
-		return -EINVAL;
-	guard(mutex)(&atcphy->lock);
-	if (atcphy->mode != APPLE_ATCPHY_MODE_USB4)
-		return -EBUSY;
-	atcphy_enable_dp_aux(atcphy);
-	dev_info(atcphy->dev, "USB4 DP AUX: enabled (mode unchanged)\n");
-	return 0;
-}
-EXPORT_SYMBOL_GPL(apple_atc_usb4_enable_dp_aux);
-
 static struct phy *atcphy_xlate(struct device *dev, const struct of_phandle_args *args)
 {
 	struct apple_atcphy *atcphy = dev_get_drvdata(dev);
