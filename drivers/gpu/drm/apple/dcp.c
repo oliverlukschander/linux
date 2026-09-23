@@ -1576,12 +1576,30 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			u32 bind = port;
 			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL,
 			    r = -EINVAL;
+			struct apple_dcp_typec_route *dp_route =
+				dcp->active_typec_route;
+			bool have_phy = dp_route && dp_route->phy;
 
 			cores[n++] = (usb4_core == 2) ? 2 : 1;
 			cores[n++] = (cores[0] == 1) ? 2 : 1;
 			dev_info(dcp->dev,
 				 "USB4: analog DPIN bind port=%u (unit %u)\n",
 				 bind, dcp->dptxport[bind].unit);
+			/*
+			 * Give DCP firmware a real PHY to train against
+			 * instead of leaving dptxport[bind].atcphy NULL --
+			 * with it NULL, dptxport_call_get_max_lane_count()
+			 * short-circuits to a fixed 4-lane analog answer and
+			 * DCP is never given anything to negotiate against.
+			 * route->phy is the per-port ATC PHY (the same one
+			 * usb4_dptx_set() already uses safely, distinct from
+			 * the shared lpdptxphy that also drives eDP).
+			 */
+			if (have_phy) {
+				dcp->dptxport[bind].atcphy = dp_route->phy;
+				phy_set_mode_ext(dp_route->phy, PHY_MODE_DP,
+						 dcp->index);
+			}
 			mutex_lock(&dcp->hpd_mutex);
 			for (i = 0; i < n; i++) {
 				u8 core = cores[i];
@@ -1596,7 +1614,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 				if (v)
 					continue;
 				c = dptxport_connect(svc, core, atc,
-						     dcp->dptx_die, true);
+						     dcp->dptx_die, !have_phy);
 				dev_info(dcp->dev,
 					 "USB4: analog DPIN connect core=%u atc=%u HPD: %d\n",
 					 core, atc, c);

@@ -592,12 +592,19 @@ static int dptxport_call_get_supports_hpd(struct apple_epic_service *service,
 
 	reply->retcode = cpu_to_le32(0);
 	/*
-	 * Analog DPIN CORE=1 already uses AFK set_hpd (returns 0).
-	 * Denying HPD here made request_display ACTIVATE then 22/24
-	 * DEVICE_NOT_STARTED (~5.5s). Advertise HPD so firmware uses
-	 * that path instead of waiting for a PHY start.
+	 * Denying HPD here once regressed to DEVICE_NOT_STARTED (~5.5s)
+	 * on the USB4 analog-DPIN path when no real PHY was attached to
+	 * answer the link-training APCALLs that follow. That path now
+	 * attaches route->phy before connect() when available (see the
+	 * analog-DPIN block in dcp_dptx_connect()) and passes a matching
+	 * supports_hpd=false to dptxport_connect() -- this reply must
+	 * agree with that same decision instead of unconditionally
+	 * claiming HPD support for every Type-C/USB4 target, or DCP
+	 * firmware's two independent "does the AP handle HPD" signals
+	 * (this APCALL and connect()'s own payload bit) disagree.
 	 */
-	reply->supported = cpu_to_le32(dcp_is_typec_output(dcp) ? 1 : 0);
+	reply->supported = cpu_to_le32((dcp_is_typec_output(dcp) &&
+					!dcp_is_usb4_output(dcp)) ? 1 : 0);
 	dev_info(dcp->dev, "DPTXPort: GET_SUPPORTS_HPD %u usb4=%d\n",
 		 le32_to_cpu(reply->supported), dcp_is_usb4_output(dcp));
 	return 0;
