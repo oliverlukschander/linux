@@ -507,7 +507,21 @@ static const struct mux_control_ops apple_dpxbar_t602x_ops = {
 	.set = apple_dpxbar_set_t602x,
 };
 
-/* Optional diagnostic, called only by the native right-port experiment. */
+/*
+ * j416s has one display crossbar instance per Type-C port at
+ * 0x70304c000 (left), 0xb0304c000 (left), 0xf0304c000 (right) --
+ * the same top-byte pattern as the ACIO/DPIN0 addresses in
+ * drivers/thunderbolt/apple.c. Originally these three call sites only
+ * accepted the right port's address while this was a single-port
+ * proof of concept; generalized once a second port needed testing.
+ */
+static bool apple_dpxbar_is_typec_crossbar(u64 base)
+{
+	return base == 0x70304c000ULL || base == 0xb0304c000ULL ||
+	       base == 0xf0304c000ULL;
+}
+
+/* Optional diagnostic, called only by the native DPIN0 experiment. */
 int apple_dpxbar_right_frame_snapshot(struct mux_control *mux);
 int apple_dpxbar_right_frame_snapshot(struct mux_control *mux)
 {
@@ -525,7 +539,7 @@ int apple_dpxbar_right_frame_snapshot(struct mux_control *mux)
 		return -EINVAL;
 	xbar = mux_chip_priv(mux->chip);
 	res = platform_get_resource(to_platform_device(xbar->dev), IORESOURCE_MEM, 0);
-	if (!res || res->start != 0xf0304c000ULL || resource_size(res) < 0x1000)
+	if (!res || !apple_dpxbar_is_typec_crossbar(res->start) || resource_size(res) < 0x1000)
 		return -EINVAL;
 
 	/* Selection and disconnect use this same lock. No new mapping/writes. */
@@ -559,7 +573,7 @@ int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux)
 		return -EINVAL;
 	xbar = mux_chip_priv(mux->chip);
 	res = platform_get_resource(to_platform_device(xbar->dev), IORESOURCE_MEM, 0);
-	if (!res || res->start != 0xf0304c000ULL || resource_size(res) < 0x1000)
+	if (!res || !apple_dpxbar_is_typec_crossbar(res->start) || resource_size(res) < 0x1000)
 		return -EINVAL;
 	spin_lock_irqsave(&xbar->lock, flags);
 	if (xbar->selected_dispext[MUX_DPIN0] != 2)
@@ -597,7 +611,7 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	dpxbar->defer_dpin0_bringup = usb4_defer_bringup && res &&
-		res->start == 0xf0304c000ULL && resource_size(res) >= 0x1000 &&
+		apple_dpxbar_is_typec_crossbar(res->start) && resource_size(res) >= 0x1000 &&
 		of_machine_is_compatible("apple,j416s") &&
 		of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar");
 	dpxbar->dev = dev;

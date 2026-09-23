@@ -199,9 +199,19 @@ static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *rout
 	return false;
 }
 
+/*
+ * Every typec_index with its own ACIO/USB4 controller instance
+ * (0 and 1 on the left, 2 on the right on j416s) works identically
+ * here -- there is nothing right-port-specific about the native DPIN0
+ * mechanism itself, only the physical base address differs per port
+ * (see apple_usb4_typec_acio_base() in drivers/thunderbolt/apple.c).
+ * Originally bounded to typec_index==2 only while this was a
+ * single-port proof of concept; generalized once a second port needed
+ * testing.
+ */
 bool dcp_usb4_native_route(unsigned int typec_index)
 {
-	return usb4_native_dpin && usb4_protocol_probe && typec_index == 2;
+	return usb4_native_dpin && usb4_protocol_probe && typec_index <= 2;
 }
 
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
@@ -1531,7 +1541,21 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
 
-	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe)
+	/*
+	 * dcp_usb4_protocol_connect()'s own "atc" target-address field uses
+	 * a hardcoded encoding (usb4_native_dpin ? 2 : 0) that was only ever
+	 * validated against the right port (typec_index==2, where it
+	 * happened to match); its actual relationship to typec_index for
+	 * other ports is not established, unlike the address-level fixes in
+	 * dcp_usb4_native_route()/apple_usb4_dpin0_set_active()/the crossbar
+	 * and ATC PHY checks, which are a confirmed, regular per-port
+	 * pattern. Rather than guess at that encoding, scope this one-shot
+	 * experimental probe to the right port only, same as before, and
+	 * let any other port fall through to the main native-DPIN0 path
+	 * below, which is fully port-generic.
+	 */
+	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe &&
+	    dcp->active_typec_route && dcp->active_typec_route->typec_index == 2)
 		return dcp_usb4_protocol_connect(dcp, port);
 
 	if (dcp_is_usb4_output(dcp) && !usb4_force_dptx) {

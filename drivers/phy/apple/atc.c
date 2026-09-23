@@ -2337,6 +2337,20 @@ static const struct phy_ops apple_atc_dp_phy_ops = {
 	.set_mode = atcphy_dpphy_set_mode,
 };
 
+/*
+ * j416s has one ATC PHY core per Type-C port at 0x703000000 (left),
+ * 0xb03000000 (left), 0xf03000000 (right) -- the same top-byte pattern
+ * as the ACIO/DPIN0 and crossbar addresses in drivers/thunderbolt/apple.c
+ * and drivers/mux/apple-display-crossbar.c. Originally this only
+ * accepted the right port's core while this was a single-port proof
+ * of concept; generalized once a second port needed testing.
+ */
+static bool apple_atc_is_typec_core(u64 base)
+{
+	return base == 0x703000000ULL || base == 0xb03000000ULL ||
+	       base == 0xf03000000ULL;
+}
+
 int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
 int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate)
 {
@@ -2348,7 +2362,7 @@ int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate)
 		return -EOPNOTSUPP;
 	atcphy = phy_get_drvdata(phy);
 	if (!of_device_is_compatible(atcphy->np, "apple,t6020-atcphy") ||
-	    atcphy->res.core->start != 0xf03000000ULL ||
+	    !apple_atc_is_typec_core(atcphy->res.core->start) ||
 	    resource_size(atcphy->res.core) < 0x7048)
 		return -EINVAL;
 	guard(mutex)(&atcphy->lock);

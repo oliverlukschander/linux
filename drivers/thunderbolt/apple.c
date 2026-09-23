@@ -1809,12 +1809,36 @@ static int apple_dpin_wait(void *ctx)
 	return 0;
 }
 
-int apple_usb4_right_dpin0_set_active(bool active);
-int apple_usb4_right_dpin0_set_active(bool active)
+/*
+ * j416s has one ACIO/USB4 controller instance per Type-C port, each at
+ * a base address that differs only in the top byte: 0=left/0x7,
+ * 1=left/0xb, 2=right/0xf (confirmed against this machine's own device
+ * tree: /sys/firmware/devicetree/base/aliases/usb4-<N>-acio). DPIN0's
+ * offset within each instance's window is fixed, so the same top byte
+ * that selects the ACIO node also selects the matching DPIN0 range.
+ * Originally hardcoded to the right port only (0xf...) while this was
+ * a single-port proof of concept; generalized once a second port
+ * needed testing.
+ */
+static u64 apple_usb4_typec_acio_base(unsigned int typec_index)
 {
+	switch (typec_index) {
+	case 0: return 0x701ac0000ULL;
+	case 1: return 0xb01ac0000ULL;
+	case 2: return 0xf01ac0000ULL;
+	default: return 0;
+	}
+}
+
+int apple_usb4_dpin0_set_active(unsigned int typec_index, bool active);
+int apple_usb4_dpin0_set_active(unsigned int typec_index, bool active)
+{
+	u64 acio_base = apple_usb4_typec_acio_base(typec_index);
+	u64 dpin0_base = (acio_base & 0xf00000000ULL) | 0x01e50000ULL;
+	char path[32];
 	struct resource res = {
-		.start = 0xf01e50000ULL,
-		.end = 0xf01e53fffULL,
+		.start = dpin0_base,
+		.end = dpin0_base + 0x3fffULL,
 		.flags = IORESOURCE_MEM | IORESOURCE_MEM_NONPOSTED,
 		.name = "j416s-native-dpin0",
 	};
@@ -1830,9 +1854,10 @@ int apple_usb4_right_dpin0_set_active(bool active)
 	struct apple_cio *acio;
 	int ret = -ENODEV;
 
-	if (!dpin_native || !of_machine_is_compatible("apple,j416s"))
+	if (!dpin_native || !of_machine_is_compatible("apple,j416s") || !acio_base)
 		return -EOPNOTSUPP;
-	np = of_find_node_by_path("/soc/cio@f01ac0000");
+	snprintf(path, sizeof(path), "/soc/cio@%llx", acio_base);
+	np = of_find_node_by_path(path);
 	if (!np)
 		return -ENODEV;
 	pdev = of_find_device_by_node(np);
@@ -1852,7 +1877,7 @@ int apple_usb4_right_dpin0_set_active(bool active)
 		goto unlock_device;
 	}
 	if (!acio->current_cable_info || !acio->nhi_pdev ||
-	    acio->rc_res->start != 0xf01ac0000ULL) {
+	    acio->rc_res->start != acio_base) {
 		/*
 		 * A real physical unplug clears current_cable_info (and often
 		 * nhi_pdev) before the DCP-issued DEACTIVATE APCALL reaches
@@ -1917,7 +1942,7 @@ put:
 	put_device(&pdev->dev);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(apple_usb4_right_dpin0_set_active);
+EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
 
 static struct platform_driver * const apple_cio_drivers[] = {
 	&apple_nhi_driver,
