@@ -25,6 +25,20 @@ module_param(usb4_tunnel_clock, bool, 0444);
 MODULE_PARM_DESC(usb4_tunnel_clock, "Opt-in native right DPIN0 clock configuration");
 
 extern int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
+extern int apple_atc_usb4_enable_dp_aux(struct phy *phy);
+
+int dptxport_usb4_enable_dp_aux(struct phy *phy)
+{
+	int (*enable)(struct phy *phy);
+	int ret;
+
+	enable = symbol_get(apple_atc_usb4_enable_dp_aux);
+	if (!enable)
+		return -EOPNOTSUPP;
+	ret = enable(phy);
+	symbol_put(apple_atc_usb4_enable_dp_aux);
+	return ret;
+}
 
 static int dptxport_tunnel_clock(struct apple_epic_service *service, u8 rate)
 {

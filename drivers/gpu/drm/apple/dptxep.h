@@ -76,6 +76,7 @@ int dptxport_release_display(struct apple_epic_service *service);
 int dptxport_set_hpd(struct apple_epic_service *service, bool hpd);
 int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
 			     unsigned int timeout_ms);
+int dptxport_usb4_enable_dp_aux(struct phy *phy);
 
 extern unsigned int usb4_target_or;
 extern int usb4_dpin_index;
