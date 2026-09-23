@@ -692,9 +692,27 @@ dptxport_call_activate(struct apple_epic_service *service,
 	int ret = 0;
 
 	/* The native USB4 candidate must never configure a physical DP PHY. */
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
+	if (usb4_native_dpin && dcp_is_usb4_output(dcp)) {
 		ret = dptxport_native_dpin(service, true, false);
-	else if (dptx->atcphy &&
+		/*
+		 * Real macOS resends request_display (AFK/EPIC method 6,
+		 * same one dcp_dptx_connect() already calls once) from
+		 * inside AppleDCPDPTXRemotePortProxy::setPowerState's gated
+		 * handler, specifically once the IOKit power domain confirms
+		 * active -- not just once, unconditionally, at connect time.
+		 * The native DPIN0/crossbar handshake succeeding here is our
+		 * closest equivalent signal that the "power domain" for this
+		 * tunneled target is actually up, so mirror that resend here.
+		 * See notes/2026-09-23-xnu-power-state-trace.md.
+		 */
+		if (!ret) {
+			int r = dptxport_request_display(service);
+
+			dev_info(dcp->dev,
+				 "USB4: resend request_display after native DPIN0 activate: %d\n",
+				 r);
+		}
+	} else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 
