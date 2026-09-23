@@ -654,8 +654,22 @@ static int dptxport_native_dpin(struct apple_epic_service *service, bool active,
 	    dcp->index != 2 || !of_machine_is_compatible("apple,j416s") ||
 	    dcp->dptx_die != 0 || dptx->unit != 0 ||
 	    dcp->fw_compat != DCP_FIRMWARE_V_13_5 ||
-	    usb4_dpin_index != 1 || dptx->atcphy)
+	    usb4_dpin_index != 1)
 		return -EINVAL;
+	/*
+	 * The `dptx->atcphy` check this guard used to include predates
+	 * 0118, from when native DPIN0 activation and a real PHY reference
+	 * were assumed mutually exclusive. 0118 deliberately attaches
+	 * route->phy in dcp_dptx_connect() before this ACTIVATE ever runs,
+	 * so with the old check this guard silently returned -EINVAL here
+	 * every time, skipping the crossbar/ACIO handshake below entirely
+	 * -- DCP then saw ACTIVATE "fail" and immediately sent DEACTIVATE,
+	 * before ever reaching SET_LINK_RATE. Nothing below touches the PHY
+	 * object (mux_control_select/apple_usb4_dpin0_set_active operate on
+	 * the crossbar and ACIO, a physically separate block from
+	 * route->phy's own SERDES/lane logic), so there is no double-
+	 * configuration risk in letting both run.
+	 */
 	set_active = symbol_get(apple_usb4_dpin0_set_active);
 	if (!set_active)
 		return -EOPNOTSUPP;
