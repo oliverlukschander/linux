@@ -7,6 +7,7 @@
 #include <linux/phy/phy.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/printk.h>
 
 /* Extra bits OR'd into DPTX remote-port target for USB4 (bit 12 = guess for DPIN). */
 unsigned int usb4_target_or;
@@ -170,9 +171,11 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	u32 attrs = 0x100 | (dcp_is_usb4_output(service->ep->dcp) ? 1 : 0);
 
 	trace_dptxport_validate_connection(dptx, core, atc, die);
+	dptx->validate_calls++;
 	dev_info(service->ep->dcp->dev,
-		 "DPTX validate target=0x%x core=%u atc=%u die=%u or=0x%x\n",
-		 target, core, atc, die, usb4_target_or);
+		 "DPTX validate: call #%u this boot target=0x%x core=%u atc=%u die=%u or=0x%x attrs=0x%x caller=%pS\n",
+		 dptx->validate_calls, target, core, atc, die, usb4_target_or,
+		 attrs, __builtin_return_address(0));
 
 	cmd.target = cpu_to_le32(target);
 	cmd.unk = cpu_to_le32(attrs);
@@ -181,12 +184,20 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	if (ret)
 		return ret;
 
-	if (le32_to_cpu(resp.target) != target)
+	if (le32_to_cpu(resp.target) != target) {
+		dev_warn(service->ep->dcp->dev,
+			 "validate_connection: target reply 0x%x (sent 0x%x)\n",
+			 le32_to_cpu(resp.target), target);
 		return -EINVAL;
+	}
 	if (le32_to_cpu(resp.unk) != attrs) {
 		/* only the Thunderbolt DP IN role is allowed to differ */
-		if (!dcp_is_usb4_output(service->ep->dcp))
+		if (!dcp_is_usb4_output(service->ep->dcp)) {
+			dev_warn(service->ep->dcp->dev,
+				 "validate_connection: attrs reply 0x%x (sent 0x%x), rejecting\n",
+				 le32_to_cpu(resp.unk), attrs);
 			return -EINVAL;
+		}
 		dev_info(service->ep->dcp->dev,
 			 "validate_connection: attrs reply 0x%x (sent 0x%x)\n",
 			 le32_to_cpu(resp.unk), attrs);
@@ -207,8 +218,11 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
 	trace_dptxport_connect(dptx, core, atc, die);
+	dptx->connect_calls++;
 	dev_info(service->ep->dcp->dev,
-		 "DPTX connect target=0x%x unk=0x%x\n", target, unk_field);
+		 "DPTX connect: call #%u this boot target=0x%x unk=0x%x caller=%pS\n",
+		 dptx->connect_calls, target, unk_field,
+		 __builtin_return_address(0));
 
 	cmd.target = cpu_to_le32(target);
 	cmd.unk = cpu_to_le32(unk_field);
@@ -217,8 +231,12 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 	if (ret)
 		return ret;
 
-	if (le32_to_cpu(resp.target) != target)
+	if (le32_to_cpu(resp.target) != target) {
+		dev_warn(service->ep->dcp->dev,
+			 "connect: target reply 0x%x (sent 0x%x)\n",
+			 le32_to_cpu(resp.target), target);
 		return -EINVAL;
+	}
 	if (le32_to_cpu(resp.unk) != unk_field)
 		dev_notice(service->ep->dcp->dev, "unexpected unk field in reply: 0x%x (0x%x)\n",
 			  le32_to_cpu(resp.unk), unk_field);
@@ -228,12 +246,34 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 
 int dptxport_request_display(struct apple_epic_service *service)
 {
-	return afk_service_call(service, 0, 6, NULL, 0, 16, NULL, 0, 16);
+	struct dptx_port *dptx = service->cookie;
+	int ret;
+
+	dptx->request_calls++;
+	dev_info(service->ep->dcp->dev,
+		 "DPTX request_display: call #%u this boot caller=%pS\n",
+		 dptx->request_calls, __builtin_return_address(0));
+	ret = afk_service_call(service, 0, 6, NULL, 0, 16, NULL, 0, 16);
+	dev_info(service->ep->dcp->dev,
+		 "DPTX request_display: call #%u result=%d\n",
+		 dptx->request_calls, ret);
+	return ret;
 }
 
 int dptxport_release_display(struct apple_epic_service *service)
 {
-	return afk_service_call(service, 0, 7, NULL, 0, 16, NULL, 0, 16);
+	struct dptx_port *dptx = service->cookie;
+	int ret;
+
+	dptx->release_calls++;
+	dev_info(service->ep->dcp->dev,
+		 "DPTX release_display: call #%u this boot caller=%pS\n",
+		 dptx->release_calls, __builtin_return_address(0));
+	ret = afk_service_call(service, 0, 7, NULL, 0, 16, NULL, 0, 16);
+	dev_info(service->ep->dcp->dev,
+		 "DPTX release_display: call #%u result=%d\n",
+		 dptx->release_calls, ret);
+	return ret;
 }
 
 int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
@@ -251,8 +291,12 @@ int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
 				       &resp, sizeof(resp), 12, timeout_ms);
 	if (ret)
 		return ret;
-	if (le32_to_cpu(resp.unk) != hpd)
+	if (le32_to_cpu(resp.unk) != hpd) {
+		dev_warn(service->ep->dcp->dev,
+			 "set_hpd: unk reply 0x%x (sent hpd=%d)\n",
+			 le32_to_cpu(resp.unk), hpd);
 		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -802,6 +846,10 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 	trace_dptxport_apcall(dptx, idx, data_size);
 	dev_info(service->ep->dcp->dev, "DPTXPort: APCALL %u (%zu bytes)\n",
 		 idx, data_size);
+	if (data_size)
+		print_hex_dump(KERN_INFO, "DPTXPort: apcall data: ",
+			       DUMP_PREFIX_OFFSET, 16, 1, data,
+			       min(data_size, (size_t)64), true);
 
 	switch (idx) {
 	case DPTX_APCALL_WILL_CHANGE_LINKG_CONFIG:

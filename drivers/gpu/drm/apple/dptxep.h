@@ -65,6 +65,8 @@ struct dptx_port {
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
+	/* diagnostic call counters, see notes/2026-09-23-0124-*.md */
+	u32 validate_calls, connect_calls, request_calls, release_calls;
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,

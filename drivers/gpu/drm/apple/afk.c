@@ -481,6 +481,10 @@ static void afk_recv_handle_std_service(struct apple_dcp_afkep *ep, u32 channel,
 					 payload + sizeof(*call), call_size,
 					 reply + sizeof(*call), call_size);
 		if (ret) {
+			dev_warn(ep->dcp->dev,
+				 "AFK[ep:%02x]: %s (chan:%u) apcall %u handler returned %d, sending NO reply\n",
+				 ep->endpoint, service->ops->name, channel,
+				 le32_to_cpu(call->type), ret);
 			kfree(reply);
 			return;
 		}
@@ -972,6 +976,10 @@ int afk_send_command_timeout(struct apple_epic_service *service, u8 type,
 			service->cmds[idx].completion = NULL;
 			service->cmds[idx].free_on_ack = true;
 			spin_unlock_irqrestore(&service->lock, flags);
+			dev_warn(ep->dcp->dev,
+				 "AFK[ep:%02x]: %s (chan:%u) command type 0x%x tag 0x%04x timed out after %u ms\n",
+				 ep->endpoint, service->ops->name, service->channel,
+				 type, tag, timeout_ms);
 			return -ETIMEDOUT;
 		}
 		spin_unlock_irqrestore(&service->lock, flags);
@@ -1033,18 +1041,38 @@ int afk_service_call_timeout(struct apple_epic_service *service, u16 group,
 	ret = afk_send_command_timeout(service, EPIC_SUBTYPE_STD_SERVICE, bfr,
 				       bfr_len, bfr, bfr_len, &retcode,
 				       timeout_ms);
-	if (ret)
+	if (ret) {
+		dev_warn(service->ep->dcp->dev,
+			 "AFK[ep:%02x]: %s (chan:%u) service call group %u cmd %u failed to complete: %d\n",
+			 service->ep->endpoint, service->ops->name,
+			 service->channel, group, command, ret);
 		goto out;
+	}
 	if (retcode) {
+		dev_warn(service->ep->dcp->dev,
+			 "AFK[ep:%02x]: %s (chan:%u) service call group %u cmd %u returned retcode 0x%08x (reply data_len %u)\n",
+			 service->ep->endpoint, service->ops->name,
+			 service->channel, group, command, retcode,
+			 le32_to_cpu(call->data_len));
 		ret = -EINVAL;
 		goto out;
 	}
 	if (le32_to_cpu(call->magic) != EPIC_SERVICE_CALL_MAGIC ||
 	    le16_to_cpu(call->group) != group ||
 	    le32_to_cpu(call->command) != command) {
+		dev_warn(service->ep->dcp->dev,
+			 "AFK[ep:%02x]: %s (chan:%u) service call reply mismatch: sent magic 0x%08x group %u cmd %u, got magic 0x%08x group %u cmd %u\n",
+			 service->ep->endpoint, service->ops->name,
+			 service->channel, EPIC_SERVICE_CALL_MAGIC, group,
+			 command, le32_to_cpu(call->magic),
+			 le16_to_cpu(call->group), le32_to_cpu(call->command));
 		ret = -EINVAL;
 		goto out;
 	}
+	dev_dbg(service->ep->dcp->dev,
+		"AFK[ep:%02x]: %s (chan:%u) service call group %u cmd %u ok (reply data_len %u)\n",
+		service->ep->endpoint, service->ops->name, service->channel,
+		group, command, le32_to_cpu(call->data_len));
 
 	retlen = le32_to_cpu(call->data_len);
 	if (output_len < retlen)
