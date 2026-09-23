@@ -150,13 +150,32 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	int ret;
 	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
+	/*
+	 * attributes: role (0 = direct PHY, 1 = Thunderbolt/USB4 DP IN) |
+	 * supportsHPD << 8. A real, hardware-validated reference
+	 * implementation of the equivalent Thunderbolt DP tunnel mechanism
+	 * on a different SoC (aurora-silicon/linux#8) adds this exact role
+	 * bit for its tunnel routes; our own analog-DPIN path has never set
+	 * it, always sending a plain direct-PHY attributes value even
+	 * though this is a genuinely USB4-tunneled connection. If DCP
+	 * firmware treats a failed AUX probe as fatal for role=0 but
+	 * expects to keep training regardless for role=1 (a Thunderbolt
+	 * tunnel's AUX proxying may not respond as fast as a direct PHY's),
+	 * that alone would explain every one of tonight's runs -- 0119,
+	 * 0121 and 0122 all reached the identical INACTIVE_SINK_DETECTED/
+	 * DPRX-timeout outcome despite substantially different Activate/
+	 * crossbar ordering, which points at a signal we are not sending
+	 * at all rather than a timing issue we can fix by reordering.
+	 */
+	u32 attrs = 0x100 | (dcp_is_usb4_output(service->ep->dcp) ? 1 : 0);
+
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 	dev_info(service->ep->dcp->dev,
 		 "DPTX validate target=0x%x core=%u atc=%u die=%u or=0x%x\n",
 		 target, core, atc, die, usb4_target_or);
 
 	cmd.target = cpu_to_le32(target);
-	cmd.unk = cpu_to_le32(0x100);
+	cmd.unk = cpu_to_le32(attrs);
 	ret = afk_service_call(service, 0, 12, &cmd, sizeof(cmd), 40, &resp,
 			       sizeof(resp), 40);
 	if (ret)
@@ -164,8 +183,14 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 
 	if (le32_to_cpu(resp.target) != target)
 		return -EINVAL;
-	if (le32_to_cpu(resp.unk) != 0x100)
-		return -EINVAL;
+	if (le32_to_cpu(resp.unk) != attrs) {
+		/* only the Thunderbolt DP IN role is allowed to differ */
+		if (!dcp_is_usb4_output(service->ep->dcp))
+			return -EINVAL;
+		dev_info(service->ep->dcp->dev,
+			 "validate_connection: attrs reply 0x%x (sent 0x%x)\n",
+			 le32_to_cpu(resp.unk), attrs);
+	}
 
 	return 0;
 }
@@ -175,7 +200,9 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 {
 	struct dptx_port *dptx = service->cookie;
 	struct dcpdptx_connection_cmd cmd, resp;
-	u32 unk_field = supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0;
+	/* same role bit as dptxport_validate_connection() above */
+	u32 unk_field = (supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0) |
+			(dcp_is_usb4_output(service->ep->dcp) ? 1 : 0);
 	int ret;
 	u32 target = dptxport_remote_target(service->ep->dcp, core, atc, die);
 
