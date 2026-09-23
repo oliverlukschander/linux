@@ -591,6 +591,115 @@ int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux)
 }
 EXPORT_SYMBOL_GPL(apple_dpxbar_right_dpin0_bring_up);
 
+/*
+ * Generalization of t602x_right_dpin0_bring_up() (kept above, unchanged, for
+ * the existing native-DPIN0 experiment) to any index and any already-
+ * selected dispext, for aurora-silicon/linux#8's dcp_tunnel_crossbar_up():
+ * bring the clock/FIFO gates up on a mux that dcp_typec_route_activate()
+ * already selected (deferred mode, no gates yet). Same register set,
+ * parameterized on the live selected_dispext[index] instead of a hardcoded
+ * source 2, and this index's own atc_bit instead of always dpin0's.
+ */
+int apple_dpxbar_link_up(struct mux_control *mux);
+int apple_dpxbar_link_up(struct mux_control *mux)
+{
+	struct apple_dpxbar *xbar;
+	unsigned int index;
+	unsigned long flags;
+	u32 dispext_bit, atc_bit;
+	int state, ret = 0;
+
+	if (!mux || mux->chip->ops != &apple_dpxbar_t602x_ops)
+		return -EINVAL;
+	index = mux_control_get_index(mux);
+	atc_bit = t602x_atc_bit(index);
+	xbar = mux_chip_priv(mux->chip);
+
+	spin_lock_irqsave(&xbar->lock, flags);
+	state = xbar->selected_dispext[index];
+	if (state < 0) {
+		spin_unlock_irqrestore(&xbar->lock, flags);
+		return -ENODEV;
+	}
+	dispext_bit = 1 << state;
+
+	dpxbar_clear32(xbar, T602X_FIFO_WR_N_CLK_EN, dispext_bit);
+	dpxbar_clear32(xbar, T602X_REG_014, dispext_bit);
+	dpxbar_clear32(xbar, index == MUX_DPIN0 ? T602X_FIFO_RD_PCLK2_EN :
+			     FIFO_RD_PCLK1_EN, atc_bit);
+	udelay(1);
+
+	dpxbar_set32(xbar, T602X_FIFO_WR_UNK_EN, dispext_bit);
+	dpxbar_mask32(xbar, T602X_REG_018, GENMASK(5, 4), BIT(4));
+	/*
+	 * t602x_right_dpin0_bring_up() wrote BIT(0) here, which is both
+	 * ATC_DPIN0 and MUX_DPIN0's own enum value (1) coincidentally
+	 * overlapping at bit 0 -- this 2-bit field's real meaning was never
+	 * disambiguated for a second index. Use FIELD_PREP(..., index),
+	 * matching MUX_DPPHY=0/MUX_DPIN0=1/MUX_DPIN1=2, since that is the
+	 * interpretation consistent with the original DPIN0-only value.
+	 */
+	dpxbar_mask32(xbar, T602X_FIFO_RD_N_CLK_EN, GENMASK(1, 0),
+		      FIELD_PREP(GENMASK(1, 0), index));
+	dpxbar_set32(xbar, T602X_FIFO_WR_DPTX_CLK_EN, dispext_bit);
+	dpxbar_set32(xbar, T602X_REG_00C, dispext_bit);
+	dpxbar_set32(xbar, T602X_REG_01C, atc_bit);
+	dpxbar_set32(xbar, T602X_REG_034, atc_bit);
+	dpxbar_set32(xbar, CROSSBAR_ATC_EN, atc_bit);
+	dpxbar_set32(xbar, CROSSBAR_DISPEXT_EN, dispext_bit);
+	dpxbar_set32(xbar, T602X_FIFO_RD_UNK_EN, dispext_bit);
+	spin_unlock_irqrestore(&xbar->lock, flags);
+
+	dev_info(xbar->dev, "%s: crossbar link up (dispext=%d atc=0x%x)\n",
+		 apple_dpxbar_names[index], state, atc_bit);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_dpxbar_link_up);
+
+/*
+ * Inverse of apple_dpxbar_link_up(): gate the clocks back down without
+ * deselecting the mux or dropping CROSSBAR_ATC_EN/CROSSBAR_DISPEXT_EN --
+ * ported from aurora-silicon/linux#8's own apple_dpxbar_link_down()
+ * semantics ("mux selection and ATC output enable kept"). Re-asserts the
+ * same reset bits apple_dpxbar_link_up()/t602x_right_dpin0_bring_up()
+ * release, so a later link_up() on the same route starts from the same
+ * state as a fresh selection.
+ */
+int apple_dpxbar_link_down(struct mux_control *mux);
+int apple_dpxbar_link_down(struct mux_control *mux)
+{
+	struct apple_dpxbar *xbar;
+	unsigned int index;
+	unsigned long flags;
+	u32 dispext_bit, atc_bit;
+	int state;
+
+	if (!mux || mux->chip->ops != &apple_dpxbar_t602x_ops)
+		return -EINVAL;
+	index = mux_control_get_index(mux);
+	atc_bit = t602x_atc_bit(index);
+	xbar = mux_chip_priv(mux->chip);
+
+	spin_lock_irqsave(&xbar->lock, flags);
+	state = xbar->selected_dispext[index];
+	if (state < 0) {
+		spin_unlock_irqrestore(&xbar->lock, flags);
+		return -ENODEV;
+	}
+	dispext_bit = 1 << state;
+
+	dpxbar_set32(xbar, T602X_FIFO_WR_N_CLK_EN, dispext_bit);
+	dpxbar_set32(xbar, T602X_REG_014, dispext_bit);
+	dpxbar_set32(xbar, index == MUX_DPIN0 ? T602X_FIFO_RD_PCLK2_EN :
+			   FIFO_RD_PCLK1_EN, atc_bit);
+	spin_unlock_irqrestore(&xbar->lock, flags);
+
+	dev_info(xbar->dev, "%s: crossbar link down (dispext=%d atc=0x%x)\n",
+		 apple_dpxbar_names[index], state, atc_bit);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_dpxbar_link_down);
+
 static int apple_dpxbar_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;

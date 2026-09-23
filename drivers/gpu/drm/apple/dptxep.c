@@ -9,56 +9,13 @@
 #include <linux/jiffies.h>
 #include <linux/printk.h>
 
-/* Extra bits OR'd into DPTX remote-port target for USB4 (bit 12 = guess for DPIN). */
-unsigned int usb4_target_or;
-module_param(usb4_target_or, uint, 0644);
-MODULE_PARM_DESC(usb4_target_or,
-		 "OR into USB4 DPTX remote-port target after DPIN field");
+#include <linux/soc/apple/dp-tunnel.h>
 
 #include "afk.h"
 #include "dcp.h"
 #include "dptxep.h"
 #include "parser.h"
 #include "trace.h"
-
-static bool usb4_tunnel_clock;
-module_param(usb4_tunnel_clock, bool, 0444);
-MODULE_PARM_DESC(usb4_tunnel_clock, "Opt-in native right DPIN0 clock configuration");
-
-extern int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
-
-static int dptxport_tunnel_clock(struct apple_epic_service *service, u8 rate)
-{
-	struct apple_dcp *dcp = service->ep->dcp;
-	struct apple_dcp_typec_route *route = dcp->active_typec_route;
-	struct dptx_port *dptx = service->cookie;
-	int (*configure)(struct phy *phy, u8 rate);
-	struct phy *phy = dptx->usb4_clock_phy;
-	int ret;
-
-	if (!usb4_tunnel_clock)
-		return 0;
-	if (rate) {
-		if (!usb4_native_dpin || !dcp_usb4_protocol_probe_enabled() ||
-		    !route || !route->usb4_selected || !route->phy ||
-		    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2 ||
-		    dcp->index != 2 || dptx->unit != 0 || dcp->dptx_die != 0 ||
-		    dcp->fw_compat != DCP_FIRMWARE_V_13_5 || usb4_dpin_index != 1)
-			return -EINVAL;
-		phy = route->phy;
-	}
-	if (!phy)
-		return 0;
-	configure = symbol_get(apple_atc_right_usb4_tunnel_rate);
-	if (!configure)
-		return -EOPNOTSUPP;
-	ret = configure(phy, rate);
-	symbol_put(apple_atc_right_usb4_tunnel_rate);
-	if (!ret)
-		dptx->usb4_clock_phy = rate ? phy : NULL;
-	dev_info(dcp->dev, "USB4 tunnel clock callback: rate=0x%x result=%d\n", rate, ret);
-	return ret;
-}
 
 struct dcpdptx_connection_cmd {
 	__le32 unk;
@@ -121,26 +78,19 @@ struct dptxport_apcall_set_tiled {
 	__le32 retcode;
 };
 
+/*
+ * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel uses the same
+ * plain CORE|ATC|DIE|CONNECTED target as a direct alt-mode PHY. CORE is the
+ * DFP port (0 = dpphy, 1/2 = dpin0/dpin1, dcp->dptx_dfp_port), ATC is the
+ * route's own ATC index -- no separate DPIN field.
+ */
 static u32 dptxport_remote_target(struct apple_dcp *dcp, u8 core, u8 atc,
 				  u8 die)
 {
-	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-		     FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-		     DCPDPTX_REMOTE_PORT_CONNECTED;
-
-	if (dcp_is_usb4_output(dcp) && !dcp_usb4_protocol_probe_enabled()) {
-		unsigned int dpin = (usb4_dpin_index == 2) ? 2 : 1;
-
-		/* CORE 1/2 = USB4 dpin0/dpin1. DPIN selects analog. ATC=0. */
-		target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
-			 FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
-			 FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
-			 FIELD_PREP(DCPDPTX_REMOTE_PORT_DPIN, dpin) |
-			 DCPDPTX_REMOTE_PORT_CONNECTED |
-			 usb4_target_or;
-	}
-	return target;
+	return FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
+	       FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
+	       FIELD_PREP(DCPDPTX_REMOTE_PORT_DIE, die) |
+	       DCPDPTX_REMOTE_PORT_CONNECTED;
 }
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
@@ -173,8 +123,8 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 	dptx->validate_calls++;
 	dev_info(service->ep->dcp->dev,
-		 "DPTX validate: call #%u this boot target=0x%x core=%u atc=%u die=%u or=0x%x attrs=0x%x caller=%pS\n",
-		 dptx->validate_calls, target, core, atc, die, usb4_target_or,
+		 "DPTX validate: call #%u this boot target=0x%x core=%u atc=%u die=%u attrs=0x%x caller=%pS\n",
+		 dptx->validate_calls, target, core, atc, die,
 		 attrs, __builtin_return_address(0));
 
 	cmd.target = cpu_to_le32(target);
@@ -529,43 +479,16 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 	return 0;
 }
 
-static int dptxport_native_dpin(struct apple_epic_service *service, bool active,
-				bool bring_up, bool crossbar);
-
 static int
 dptxport_call_did_change_link_config(struct apple_epic_service *service)
 {
-	struct apple_dcp *dcp = service->ep->dcp;
-	struct dptx_port *dptx = service->cookie;
-	int ret;
-
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp) && dptx->link_rate) {
-		/*
-		 * Native ATCDP brings the connection up after setting a nonzero
-		 * link rate. ACTIVATE alone precedes that clock configuration.
-		 * With tunnel clocks configured, bring up the selected crossbar
-		 * without disconnecting it. Legacy probe-only builds retain the
-		 * old reselect. The DPIN handshake is cached by its owner.
-		 */
-		if (dptx->usb4_link_up_attempted) {
-			/* A repeated completion does not require another hardware attempt. */
-			if (usb4_tunnel_clock && dptx->usb4_clock_phy &&
-			    dptx->usb4_link_up_rate == dptx->link_rate) {
-				dev_info(dcp->dev, "native DPIN0: repeated link-config rate=0x%x cached success\n",
-					 dptx->link_rate);
-				mdelay(10);
-				return 0;
-			}
-			return -EALREADY;
-		}
-		dptx->usb4_link_up_attempted = true;
-		ret = dptxport_native_dpin(service, true, usb4_tunnel_clock, true);
-		dev_info(dcp->dev, "native DPIN0: link-config up rate=0x%x result=%d\n",
-			 dptx->link_rate, ret);
-		if (ret)
-			return ret;
-		dptx->usb4_link_up_rate = dptx->link_rate;
-	}
+	/*
+	 * Ported from aurora-silicon/linux#8: bringing the tunnel crossbar
+	 * connection up (dcp_tunnel_crossbar_up()) now happens in
+	 * dptxport_call(), after this succeeds, gated on
+	 * dptx_tunnel && link_rate -- not inside this handler, and its
+	 * result is never propagated back to DCP as a call failure.
+	 */
 
 	/* assume the link config did change and wait a little bit */
 	mdelay(10);
@@ -625,25 +548,25 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 	}
 
 	if (phy_set_rate) {
-		if (dcp_is_usb4_output(service->ep->dcp) ||
-		    (!link_rate && dptx->usb4_clock_phy)) {
-			ret = dptxport_tunnel_clock(service, link_rate);
-			if (ret)
-				return ret;
-		}
-		dptx->phy_ops.dp.link_rate = phy_link_rate;
-		dptx->phy_ops.dp.set_rate = 1;
-
-		if (dptx->atcphy && !dcp_is_usb4_output(service->ep->dcp)) {
+		/*
+		 * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel
+		 * starts/stops its own pixel clock instead of configuring the
+		 * PHY directly, and never fails the apcall over it -- a
+		 * failed clock just keeps the crossbar connection down
+		 * (dcp->tb_clock_ok), which dcp_tunnel_crossbar_up() checks.
+		 */
+		if (dptx->atcphy && service->ep->dcp->dptx_tunnel) {
+			dcp_tunnel_set_rate(service->ep->dcp, dptx->atcphy,
+					    link_rate);
+		} else if (dptx->atcphy) {
+			dptx->phy_ops.dp.link_rate = phy_link_rate;
+			dptx->phy_ops.dp.set_rate = 1;
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
 		}
 
 		dptx->link_rate = dptx->pending_link_rate = link_rate;
-		if (!link_rate)
-			dptx->usb4_link_up_rate = 0;
-
 	}
 
 	//dptx->pending_link_rate = link_rate;
@@ -701,74 +624,6 @@ static int dptxport_call_set_tiled_display_hint(void *reply_,
 	return 0;
 }
 
-/* Optional symbol: keep the default DRM module independent of USB4. */
-extern int apple_usb4_dpin0_set_active(unsigned int typec_index, bool active);
-extern int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux);
-
-static int dptxport_native_dpin(struct apple_epic_service *service, bool active,
-				bool bring_up, bool crossbar)
-{
-	struct apple_dcp *dcp = service->ep->dcp;
-	struct apple_dcp_typec_route *route = dcp->active_typec_route;
-	struct dptx_port *dptx = service->cookie;
-	int (*set_active)(unsigned int typec_index, bool active);
-	int ret;
-
-	if (!dcp_usb4_protocol_probe_enabled() || !route ||
-	    !route->usb4_selected || !route->usb4_xbar ||
-	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2 ||
-	    dcp->index != 2 || !of_machine_is_compatible("apple,j416s") ||
-	    dcp->dptx_die != 0 || dptx->unit != 0 ||
-	    dcp->fw_compat != DCP_FIRMWARE_V_13_5 ||
-	    usb4_dpin_index != 1)
-		return -EINVAL;
-	/*
-	 * The `dptx->atcphy` check this guard used to include predates
-	 * 0118, from when native DPIN0 activation and a real PHY reference
-	 * were assumed mutually exclusive. 0118 deliberately attaches
-	 * route->phy in dcp_dptx_connect() before this ACTIVATE ever runs,
-	 * so with the old check this guard silently returned -EINVAL here
-	 * every time, skipping the crossbar/ACIO handshake below entirely
-	 * -- DCP then saw ACTIVATE "fail" and immediately sent DEACTIVATE,
-	 * before ever reaching SET_LINK_RATE. Nothing below touches the PHY
-	 * object (mux_control_select/apple_usb4_dpin0_set_active operate on
-	 * the crossbar and ACIO, a physically separate block from
-	 * route->phy's own SERDES/lane logic), so there is no double-
-	 * configuration risk in letting both run.
-	 */
-	set_active = symbol_get(apple_usb4_dpin0_set_active);
-	if (!set_active)
-		return -EOPNOTSUPP;
-	if (active && crossbar && bring_up) {
-		int (*up)(struct mux_control *mux);
-
-		if (!usb4_tunnel_clock || !dptx->usb4_clock_phy || !dptx->link_rate) {
-			ret = -EINVAL;
-			goto out;
-		}
-		up = symbol_get(apple_dpxbar_right_dpin0_bring_up);
-		if (!up) {
-			ret = -EOPNOTSUPP;
-			goto out;
-		}
-		ret = up(route->usb4_xbar);
-		symbol_put(apple_dpxbar_right_dpin0_bring_up);
-		if (ret)
-			goto out;
-	} else if (active && crossbar) {
-		/* macOS connects the crossbar here, after DCP power/reset. */
-		mux_control_deselect(route->usb4_xbar);
-		ret = mux_control_select(route->usb4_xbar, route->mux_index);
-		if (ret)
-			goto out;
-	}
-	ret = set_active(route->typec_index, active);
-out:
-	symbol_put(apple_usb4_dpin0_set_active);
-	dev_info(dcp->dev, "native DPIN0: DCP active=%u result=%d\n", active, ret);
-	return ret;
-}
-
 static int
 dptxport_call_activate(struct apple_epic_service *service,
 		       const void *data, size_t data_size,
@@ -776,34 +631,23 @@ dptxport_call_activate(struct apple_epic_service *service,
 {
 	struct dptx_port *dptx = service->cookie;
 	struct apple_dcp *dcp = service->ep->dcp;
-	int ret = 0;
 
-	/* The native USB4 candidate must never configure a physical DP PHY. */
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp)) {
-		/*
-		 * A real, hardware-validated reference implementation of the
-		 * equivalent Thunderbolt DP tunnel mechanism on a different
-		 * SoC (aurora-silicon/linux#8, tested on t8103) confirmed
-		 * Activate must wake the DP IN adapter (its own comment:
-		 * "waking it earlier hangs the machine" -- i.e. this step is
-		 * required here, not optional) but must NOT select the
-		 * crossbar mux yet: that's deferred to
-		 * DidChangeLinkConfiguration, gated on a link rate already
-		 * being set by SetLinkRate. Confirmed empirically too: doing
-		 * neither here (an earlier version of this candidate) left
-		 * DCP with nothing at all -- not even INACTIVE_SINK_DETECTED
-		 * fired. dptxport_call_did_change_link_config() below already
-		 * brings the crossbar up itself, correctly gated on
-		 * dptx->link_rate, once SET_LINK_RATE actually arrives.
-		 */
-		ret = dptxport_native_dpin(service, true, false, false);
-	} else if (dptx->atcphy &&
-	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
+	/*
+	 * Ported from aurora-silicon/linux#8: no crossbar, and no PHY mode
+	 * change for a tunnel (dptx->atcphy must stay in USB4/TBT mode the
+	 * whole connection, see dcp_tunnel_set_rate()). The DP IN adapter is
+	 * only woken (DPTX_INACTIVE=0) here, via dcp_tunnel_dpin_activate();
+	 * waking it earlier hangs the machine. Activate always replies
+	 * success to DCP.
+	 */
+	if (dptx->atcphy && !dcp->phy_managed_by_typec)
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
+	if (dcp->dptx_tunnel)
+		dcp_tunnel_dpin_activate(dcp, true);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
-		*(__le32 *)reply = cpu_to_le32(ret ? 1 : 0);
+		memset(reply, 0, 4);
 
 	return 0;
 }
@@ -815,25 +659,16 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 {
 	struct dptx_port *dptx = service->cookie;
 	struct apple_dcp *dcp = service->ep->dcp;
-	int ret = 0;
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
-	dptx->usb4_link_up_rate = 0;
-	if (dptx->usb4_clock_phy) {
-		int clock_ret = dptxport_tunnel_clock(service, 0);
-
-		if (clock_ret)
-			dev_warn(dcp->dev, "USB4 tunnel clock cleanup failed: %d\n", clock_ret);
-	}
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		ret = dptxport_native_dpin(service, false, false, true);
-	else if (dptx->atcphy &&
-	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
+	if (dcp->dptx_tunnel)
+		dcp_tunnel_dpin_activate(dcp, false);
+	if (dptx->atcphy && !dcp->phy_managed_by_typec)
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
-		*(__le32 *)reply = cpu_to_le32(ret ? 1 : 0);
+		memset(reply, 0, 4);
 
 	return 0;
 }
@@ -853,9 +688,21 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 
 	switch (idx) {
 	case DPTX_APCALL_WILL_CHANGE_LINKG_CONFIG:
+		/*
+		 * Ported from aurora-silicon/linux#8: a re-link on an
+		 * established tunnel takes the crossbar connection down
+		 * first.
+		 */
+		if (service->ep->dcp->dptx_tunnel && dptx->link_rate)
+			dcp_tunnel_crossbar_down(service->ep->dcp);
 		return dptxport_call_will_change_link_config(service);
-	case DPTX_APCALL_DID_CHANGE_LINK_CONFIG:
-		return dptxport_call_did_change_link_config(service);
+	case DPTX_APCALL_DID_CHANGE_LINK_CONFIG: {
+		int ret = dptxport_call_did_change_link_config(service);
+
+		if (!ret && service->ep->dcp->dptx_tunnel && dptx->link_rate)
+			dcp_tunnel_crossbar_up(service->ep->dcp);
+		return ret;
+	}
 	case DPTX_APCALL_GET_MAX_LINK_RATE:
 		return dptxport_call_get_max_link_rate(service, reply,
 						       reply_size);

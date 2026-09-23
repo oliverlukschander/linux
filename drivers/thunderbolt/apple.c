@@ -62,12 +62,14 @@
 #include <linux/string.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_graph.h>
 #include <linux/of_platform.h>
 #include <linux/pci-apple.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
+#include <linux/soc/apple/dp-tunnel.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/soc/apple/tunable.h>
 #include <linux/spinlock.h>
@@ -137,6 +139,9 @@ module_param(dpin_mode_value, uint, 0644);
 MODULE_PARM_DESC(dpin_mode_value,
 		 "DPIN0 MODE_A/MODE_B lab value (0-" __stringify(APPLE_DPIN_MODE_VALUE_MAX) "); read at each activate");
 
+struct apple_dpin_ctx;
+static void apple_dpin_work_fn(struct work_struct *work);
+
 struct apple_cio {
 	struct device *dev;
 	struct device_node *np;
@@ -173,6 +178,24 @@ struct apple_cio {
 	struct delayed_work pcie_tunnel_work;
 	bool pcie_tunnel_requested;
 	bool pcie_tunnel_populated;
+
+	/*
+	 * Thunderbolt DP tunnel routing, ported from aurora-silicon/linux#8.
+	 * Type-C connector this router is wired to (ACIO port@1 -> the PD
+	 * controller's connector node), used to find the matching DCP
+	 * Type-C port via apple_dcp_tb_dp_tunnel().
+	 */
+	struct device_node *connector_np;
+	struct workqueue_struct *dp_wq;
+	struct apple_dpin_ctx {
+		struct apple_cio *acio;
+		struct work_struct work;
+		struct mutex lock; /* protects regs and alive */
+		void __iomem *regs; /* mapped while a DP tunnel uses this adapter */
+		unsigned int idx;
+		bool alive; /* tunnel up; cleared before it is torn down */
+		bool handed; /* appledrm has our callback; work only */
+	} dpin[2];
 };
 
 static void apple_cio_of_node_put(void *data)
@@ -1029,6 +1052,30 @@ out_unlock:
 	mutex_unlock(&anhi->tb->lock);
 }
 
+/*
+ * Which DP IN adapter (0/1) on the host router this port is -- same
+ * counting order as apple_dp_in_analog_base() above, and as
+ * apple_nhi_dp_tunnel_changed()'s port-to-dpin mapping in
+ * aurora-silicon/linux#8.
+ */
+static int apple_dpin_index_for_port(struct apple_nhi *anhi, struct tb_port *in)
+{
+	unsigned int idx = 0;
+	struct tb_port *port;
+
+	if (!anhi->tb || !anhi->tb->root_switch)
+		return -1;
+
+	tb_switch_for_each_port(anhi->tb->root_switch, port) {
+		if (!tb_port_is_dpin(port))
+			continue;
+		if (port == in)
+			return idx;
+		idx++;
+	}
+	return -1;
+}
+
 static int apple_nhi_dp_tunnel_pre_activate(struct tb_nhi *nhi,
 					    struct tb_port *in,
 					    struct tb_port *out)
@@ -1043,16 +1090,10 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 					     struct tb_port *out)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
-	int i;
+	int i, idx;
 
-	/*
-	 * PCIe-C pulses Intr2AXI after the adapters are enabled. DP IN
-	 * analog/AUX is the same boundary: VE/AE/HPD are already 1, and
-	 * the display crossbar has selected dpin. DPRX_DONE stays 0
-	 * until this serializer talks AUX/DPCD into the host adapter.
-	 */
 	dev_info(anhi->dev,
-		 "DP IN analog/AUX serializer: tunnel %u:%u <-> %u:%u\n",
+		 "DP IN tunnel routing: tunnel %u:%u <-> %u:%u\n",
 		 in->sw->config.depth, in->port,
 		 out ? out->sw->config.depth : 0,
 		 out ? out->port : 0);
@@ -1067,16 +1108,30 @@ static int apple_nhi_dp_tunnel_post_activate(struct tb_nhi *nhi,
 
 	apple_dp_dump_rc(anhi->acio);
 	apple_dp_dump_vse(in->sw);
-	dev_info(anhi->dev,
-		 "DP IN analog block 0x%x (port %u) dpin_aux=%d (0=hands-off)\n",
-		 anhi->analog_base, in->port, apple_dpin_aux);
-	if (apple_dpin_aux >= 1) {
-		if (tb_port_is_dpin(in))
-			apple_dp_set_dpme(in);
-		apple_dp_start_analog(anhi, true);
+
+	/*
+	 * Route a real display pipeline to this tunnel, ported from
+	 * aurora-silicon/linux#8 -- the dpin_aux "analog AUX serializer"
+	 * mechanism previously here is confirmed ineffective on this
+	 * hardware (2026-09-21 candidates 0054-0056, and again 2026-09-23
+	 * candidate 0125 after everything else was independently fixed).
+	 */
+	idx = apple_dpin_index_for_port(anhi, in);
+	if (idx < 0 || idx > 1 || !anhi->acio) {
+		dev_warn(anhi->dev,
+			 "DP IN tunnel: could not map port %u to a dpin index\n",
+			 in->port);
+	} else if (!anhi->acio->connector_np) {
+		dev_warn(anhi->dev,
+			 "DP IN tunnel: no Type-C connector for dpin%d\n", idx);
+	} else if (!anhi->acio->dp_wq) {
+		dev_warn(anhi->dev, "DP IN tunnel: no work queue for dpin%d\n", idx);
 	} else {
-		dev_info(anhi->dev,
-			 "DP IN analog: leaving PHY alone until DPRX timeout\n");
+		struct apple_dpin_ctx *c = &anhi->acio->dpin[idx];
+
+		scoped_guard(mutex, &c->lock)
+			c->alive = true;
+		queue_work(anhi->acio->dp_wq, &c->work);
 	}
 	apple_dp_dump_host_adapters(anhi);
 	if (tb_port_is_dpin(in)) {
@@ -1101,12 +1156,32 @@ static void apple_nhi_dp_tunnel_deactivate(struct tb_nhi *nhi,
 					   struct tb_port *out)
 {
 	struct apple_nhi *anhi = nhi_to_anhi(nhi);
+	int idx;
 
 	anhi->dp_aux_armed = false;
 	cancel_delayed_work(&anhi->dp_aux_work);
 	if (READ_ONCE(apple_dpin_anhi) == anhi)
 		WRITE_ONCE(apple_dpin_anhi, NULL);
-	dev_info(anhi->dev, "DP IN analog/AUX serializer: tunnel down\n");
+
+	/*
+	 * Runs after both adapters are already disabled (tb_dp_activate()'s
+	 * teardown order) -- later than aurora-silicon/linux#8's own
+	 * dp_tunnel_changed(active=false), which fires before deactivation
+	 * while the block is still powered. apple_dpin_dcp_set_active()'s
+	 * own "block may already be off" check (matching the reference
+	 * implementation's identical defensive check) covers this gap; a
+	 * spurious no-op register access here is not a functional blocker,
+	 * only a less clean teardown than the ideal ordering.
+	 */
+	idx = apple_dpin_index_for_port(anhi, in);
+	if (idx >= 0 && idx <= 1 && anhi->acio && anhi->acio->dp_wq) {
+		struct apple_dpin_ctx *c = &anhi->acio->dpin[idx];
+
+		scoped_guard(mutex, &c->lock)
+			c->alive = false;
+		queue_work(anhi->acio->dp_wq, &c->work);
+	}
+	dev_info(anhi->dev, "DP IN tunnel routing: tunnel down\n");
 }
 
 static const struct tb_nhi_ops apple_nhi_ops = {
@@ -1704,6 +1779,36 @@ static int apple_cio_probe(struct platform_device *pdev)
 	if (IS_ERR(acio->rc_tunable))
 		return dev_err_probe(dev, PTR_ERR(acio->rc_tunable), "Unable to load rc tunable\n");
 
+	/*
+	 * Thunderbolt DP tunnel routing, ported from aurora-silicon/linux#8.
+	 * port@1 on this ACIO node is wired to the Type-C PD controller's
+	 * connector node (confirmed present on this exact hardware via the
+	 * live devicetree, unlike t8103 this was not added for this port --
+	 * it already existed). Not fatal if absent: a tunnel on this router
+	 * just never gets a display routed to it.
+	 */
+	acio->connector_np = of_graph_get_remote_node(acio->np, 1, -1);
+	if (acio->connector_np) {
+		ret = devm_add_action_or_reset(dev, apple_cio_of_node_put,
+					       acio->connector_np);
+		if (ret)
+			return ret;
+	} else {
+		dev_warn(dev, "no Type-C connector graph endpoint (port@1); "
+			      "Thunderbolt DP tunnels will not get a display\n");
+	}
+	acio->dp_wq = devm_alloc_ordered_workqueue(dev, "%s-dp", 0, dev_name(dev));
+	if (!acio->dp_wq)
+		return dev_err_probe(dev, -ENOMEM, "Unable to allocate DP tunnel work queue\n");
+	for (unsigned int i = 0; i < ARRAY_SIZE(acio->dpin); i++) {
+		acio->dpin[i].acio = acio;
+		acio->dpin[i].idx = i;
+		ret = devm_mutex_init(dev, &acio->dpin[i].lock);
+		if (ret)
+			return ret;
+		INIT_WORK(&acio->dpin[i].work, apple_dpin_work_fn);
+	}
+
 	acio->reset = devm_reset_control_get_exclusive(dev, NULL);
 	if (IS_ERR(acio->reset))
 		return dev_err_probe(dev, PTR_ERR(acio->reset), "Unable to get CIO reset\n");
@@ -1943,6 +2048,197 @@ put:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
+
+/*
+ * Thunderbolt DP tunnel routing, ported from aurora-silicon/linux#8: the
+ * real trigger this project's own analog-DPIN/dpin_aux mechanisms never had
+ * -- a genuine "a DP tunnel came up on dpin N" notification from the
+ * Thunderbolt connection manager (via the existing dp_tunnel_pre_activate/
+ * post_activate/deactivate hooks below, at the same lifecycle points PR#8's
+ * own dedicated dp_tunnel_changed hook fires), driving DCP through the real
+ * apple_dcp_tb_dp_tunnel() entry point instead of faking a Type-C alt-mode
+ * notification. Reuses this file's own confirmed-working DPTX_INACTIVE
+ * handshake (apple_dpin_handshake(), apple_dpin_read/write/wait above)
+ * rather than reinventing it, generalized to whichever DP IN adapter (0 or
+ * 1) the tunnel actually landed on instead of always dpin0.
+ */
+
+/*
+ * The DPTX_INACTIVE handshake block (HPD/CONTROL/ACK/MODE_A/MODE_B, see
+ * apple-dpin-handshake.h) -- NOT the same as APPLE_CIO_DPIN0_ANALOG/
+ * APPLE_CIO_DPIN1_ANALOG above, which is the separate "analog AUX
+ * serializer" block confirmed ineffective on this hardware (dpin_aux,
+ * 2026-09-21 and again 2026-09-23). This offset and stride are confirmed
+ * two ways: apple_usb4_dpin0_set_active() above computes the identical
+ * address independently, and it matches this project's own boot logs
+ * ("native DPIN0: ... base=0x...701e50000" = rc_res->start (0x701ac0000)
+ * + 0x390000 for the left port).
+ */
+#define APPLE_DPIN_HANDSHAKE_OFFSET	0x390000
+#define APPLE_DPIN_STRIDE		0x8000
+#define APPLE_DPIN_HANDSHAKE_SIZE	0x4000
+
+static int apple_dpin_set_active(struct apple_cio *acio, void __iomem *regs,
+				 unsigned int idx, bool active)
+{
+	struct apple_dpin_poll poll = {
+		.base = regs,
+		.deadline = jiffies + msecs_to_jiffies(1000),
+	};
+	struct apple_dpin_io io = {
+		.read = apple_dpin_read,
+		.write = apple_dpin_write,
+		.wait = apple_dpin_wait,
+		.ctx = &poll,
+	};
+	int ret;
+
+	ret = apple_dpin_handshake(&io, active, dpin_mode_value);
+	dev_info(acio->dev, "dpin%u: %s handshake=%d\n", idx,
+		 active ? "active" : "inactive", ret);
+	return ret;
+}
+
+/* Called by appledrm from DCP's Activate/Deactivate calls. */
+static int apple_dpin_dcp_set_active(void *data, bool active)
+{
+	struct apple_dpin_ctx *c = data;
+	int ret;
+
+	guard(mutex)(&c->lock);
+	/* The tunnel is being torn down: the block may already be off. */
+	if (!c->alive || !c->regs)
+		return -ENODEV;
+	ret = apple_dpin_set_active(c->acio, c->regs, c->idx, active);
+	return ret;
+}
+
+/* appledrm may still be probing when a dock is present at boot: wait up to 30 s. */
+#define APPLE_DP_CONNECT_TRIES		60
+#define APPLE_DP_CONNECT_WAIT_MS	500
+
+static int apple_dpin_connect(struct apple_dpin_ctx *c, bool active)
+{
+	struct apple_cio *acio = c->acio;
+	typeof(&apple_dcp_tb_dp_tunnel) fn;
+	unsigned int tries;
+	bool alive;
+	int ret;
+
+	for (tries = 1; ; tries++) {
+		fn = symbol_get(apple_dcp_tb_dp_tunnel);
+		if (fn) {
+			ret = fn(acio->connector_np, c->idx, active,
+				 active ? apple_dpin_dcp_set_active : NULL,
+				 active ? c : NULL);
+			symbol_put(apple_dcp_tb_dp_tunnel);
+		} else {
+			/* appledrm gone: it has dropped our callback with it. */
+			if (!active)
+				return 0;
+			ret = -ENODEV;
+		}
+		if (!active || ret != -ENODEV || tries >= APPLE_DP_CONNECT_TRIES)
+			return ret;
+
+		scoped_guard(mutex, &c->lock)
+			alive = c->alive;
+		if (!alive)
+			return -ENODEV;
+		if (tries == 1)
+			dev_info(acio->dev, "dpin%u: waiting for the display driver\n",
+				 c->idx);
+		msleep(APPLE_DP_CONNECT_WAIT_MS);
+	}
+}
+
+static int apple_dpin_up(struct apple_dpin_ctx *c)
+{
+	struct apple_cio *acio = c->acio;
+	void __iomem *regs = c->regs;
+	int ret;
+
+	if (!regs) {
+		if (!acio->rc_res)
+			return -ENODEV;
+		regs = ioremap_np(acio->rc_res->start + APPLE_DPIN_HANDSHAKE_OFFSET +
+				  c->idx * APPLE_DPIN_STRIDE, APPLE_DPIN_HANDSHAKE_SIZE);
+		if (!regs)
+			return -ENOMEM;
+	}
+	scoped_guard(mutex, &c->lock) {
+		c->regs = regs;
+		/* Unplugged meanwhile: the block may be off, leave it alone. */
+		if (!c->alive)
+			return -ENODEV;
+	}
+
+	ret = apple_dpin_connect(c, true);
+	if (!ret)
+		c->handed = true;
+	return ret;
+}
+
+static void apple_dpin_down(struct apple_dpin_ctx *c)
+{
+	void __iomem *regs;
+	int ret;
+
+	if (c->handed) {
+		ret = apple_dpin_connect(c, false);
+		if (ret)
+			dev_warn(c->acio->dev, "dpin%u: display teardown failed: %d\n",
+				 c->idx, ret);
+		c->handed = false;
+	}
+	/* The adapter was put to sleep by the caller before this runs. */
+	scoped_guard(mutex, &c->lock) {
+		regs = c->regs;
+		c->regs = NULL;
+	}
+	if (regs)
+		iounmap(regs);
+}
+
+/*
+ * Bring the display side in line with the tunnel state. One work item per
+ * adapter on an ordered queue, so events are never lost and nothing has to
+ * be allocated on the way down: whatever was handed to appledrm is taken
+ * back.
+ */
+static void apple_dpin_work_fn(struct work_struct *work)
+{
+	struct apple_dpin_ctx *c = container_of(work, struct apple_dpin_ctx, work);
+	bool want;
+	int ret;
+
+	for (;;) {
+		scoped_guard(mutex, &c->lock)
+			want = c->alive;
+
+		if (!want) {
+			if (c->handed || c->regs) {
+				apple_dpin_down(c);
+				dev_dbg(c->acio->dev, "dpin%u: DP tunnel down\n", c->idx);
+			}
+			return;
+		}
+		if (c->handed)
+			return;
+
+		ret = apple_dpin_up(c);
+		if (ret) {
+			scoped_guard(mutex, &c->lock)
+				want = c->alive;
+			if (!want)
+				continue; /* Unplugged meanwhile: clean up. */
+			dev_warn(c->acio->dev, "dpin%u: DP tunnel setup failed: %d\n",
+				 c->idx, ret);
+			return;
+		}
+		dev_dbg(c->acio->dev, "dpin%u: DP tunnel up\n", c->idx);
+	}
+}
 
 static struct platform_driver * const apple_cio_drivers[] = {
 	&apple_nhi_driver,

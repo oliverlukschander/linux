@@ -2351,8 +2351,18 @@ static bool apple_atc_is_typec_core(u64 base)
 	       base == 0xf03000000ULL;
 }
 
-int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate);
-int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate)
+/*
+ * Ported from aurora-silicon/linux#8's apple_atc_dp_tunnel_rate() (its own
+ * comment: "Based on Oliver Lukschander's t6020 tunnel clock patch") --
+ * renamed to the reference's cross-module symbol name so
+ * dcp_tunnel_set_rate() (drivers/gpu/drm/apple/dcp.c) can find it via
+ * symbol_get(), keeping this project's own T602X-specific implementation
+ * (the reference's own version hard-fails on anything but t8103's fixed
+ * AUSPLL descriptor/PCLK1 selectors). Also accepts TBT mode, not just
+ * USB4: a genuine dock may negotiate either.
+ */
+int apple_atc_dp_tunnel_rate(struct phy *phy, u8 rate);
+int apple_atc_dp_tunnel_rate(struct phy *phy, u8 rate)
 {
 	struct apple_atcphy *atcphy;
 	int ret;
@@ -2370,13 +2380,14 @@ int apple_atc_right_usb4_tunnel_rate(struct phy *phy, u8 rate)
 		atc_tunnel_restore(atcphy);
 		return 0;
 	}
-	if (atcphy->mode != APPLE_ATCPHY_MODE_USB4)
+	if (atcphy->mode != APPLE_ATCPHY_MODE_USB4 &&
+	    atcphy->mode != APPLE_ATCPHY_MODE_TBT)
 		return -EBUSY;
 	ret = atc_tunnel_start(atcphy, rate);
-	dev_info(atcphy->dev, "USB4 tunnel clock: rate=0x%x result=%d\n", rate, ret);
+	dev_info(atcphy->dev, "DP tunnel clock: rate=0x%x result=%d\n", rate, ret);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(apple_atc_right_usb4_tunnel_rate);
+EXPORT_SYMBOL_GPL(apple_atc_dp_tunnel_rate);
 
 static struct phy *atcphy_xlate(struct device *dev, const struct of_phandle_args *args)
 {

@@ -51,8 +51,6 @@ struct apple_epic_service;
 struct dptx_port {
 	bool enabled, connected;
 	bool usb4_inactive_sink;
-	bool usb4_link_up_attempted;
-	u8 usb4_link_up_rate;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
 	struct completion usb4_lane_completion;
@@ -60,7 +58,6 @@ struct dptx_port {
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;
 	struct phy *atcphy;
-	struct phy *usb4_clock_phy;
 	struct mux_control *mux;
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
@@ -79,6 +76,4 @@ int dptxport_set_hpd(struct apple_epic_service *service, bool hpd);
 int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
 			     unsigned int timeout_ms);
 
-extern unsigned int usb4_target_or;
-extern int usb4_dpin_index;
 #endif

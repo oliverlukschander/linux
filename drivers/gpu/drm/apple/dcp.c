@@ -24,6 +24,7 @@
 #include <linux/phy/phy.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
+#include <linux/soc/apple/dp-tunnel.h>
 #include <linux/string.h>
 #include <linux/err.h>
 #include <linux/module.h>
@@ -60,59 +61,9 @@
 
 static bool show_notch;
 
-/*
- * apple-display-crossbar mux indices: 0=dpphy (DP alt-mode), 1=dpin0, 2=dpin1.
- * USB4 tunnels need a DP IN, not the ATC PHY. Default dpin0; override with
- * appledrm.usb4_dpin=2 if DPRX still fails.
- */
-int usb4_dpin_index = 1;
-module_param_named(usb4_dpin, usb4_dpin_index, int, 0644);
-MODULE_PARM_DESC(usb4_dpin,
-		 "Display crossbar mux index for USB4 DP IN (1=dpin0, 2=dpin1)");
-
-/*
- * -1 = Type-C route ATC index (Right USB-C = 2). Do not use 3: that is the
- * HDMI analog PHY, which trains the empty HDMI jack.
- */
-static int usb4_atc = -1;
-module_param_named(usb4_atc, usb4_atc, int, 0644);
-MODULE_PARM_DESC(usb4_atc,
-		 "DPTX ATC/phy index for USB4 (-1=typec route, 2=Right ATC, 3=HDMI analog)");
-
-/*
- * USB4 DP IN remote-port CORE. 0070 used CORE=0 (target 0x9000), which is an
- * AFK paper port with no DPTXController device. 2022 DCP traces of USB4
- * tunneling used CORE=1 and CORE=2 as ATCPHY_INPUT (dpin0 / dpin1).
- */
-static int usb4_core = 1;
-module_param_named(usb4_core, usb4_core, int, 0644);
-MODULE_PARM_DESC(usb4_core,
-		 "USB4 DPTX remote-port CORE (1=dpin0, 2=dpin1)");
-
-/* -1 = auto (arm the typecN whose NHI has a Thunderbolt device). 0..2 force. */
-static int usb4_arm = -1;
-static int dcp_usb4_arm_typec(int typec_index);
-static int usb4_arm_set(const char *val, const struct kernel_param *kp)
-{
-	int ret = param_set_int(val, kp);
-
-	if (ret)
-		return ret;
-	if (usb4_arm >= 0)
-		dcp_usb4_arm_typec(usb4_arm);
-	return 0;
-}
-static const struct kernel_param_ops usb4_arm_ops = {
-	.set = usb4_arm_set,
-	.get = param_get_int,
-};
-module_param_cb(usb4_arm, &usb4_arm_ops, &usb4_arm, 0644);
-MODULE_PARM_DESC(usb4_arm,
-		 "Force USB4 DP IN on typecN (0=Left Back, 1=Left Front, 2=Right)");
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 
-static struct apple_dcp *usb4_armed_dcp;
 static bool usb4_force_dptx;
 
 /* Opt-in, one attempt per module lifetime; never a live parameter write. */
@@ -124,7 +75,6 @@ bool usb4_native_dpin;
 module_param(usb4_native_dpin, bool, 0444);
 MODULE_PARM_DESC(usb4_native_dpin,
 		 "Opt-in native DP-IN ACTIVATE handshake; requires usb4_protocol_probe");
-static atomic_t usb4_protocol_probe_started = ATOMIC_INIT(0);
 
 bool dcp_usb4_protocol_probe_enabled(void)
 {
@@ -174,7 +124,7 @@ bool dcp_is_typec_output(struct apple_dcp *dcp)
 
 bool dcp_is_usb4_output(struct apple_dcp *dcp)
 {
-	return dcp->active_typec_route && dcp->active_typec_route->usb4_selected;
+	return dcp->active_typec_route && dcp->active_typec_route->tunnel;
 }
 
 static bool dcp_typec_route_is_dp(const struct typec_mux_state *state)
@@ -216,26 +166,14 @@ bool dcp_usb4_native_route(unsigned int typec_index)
 
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 {
-	/* Match the fixed CRTC advertised for the bounded native experiment. */
-	if (dcp_usb4_native_route(route->typec_index) && route->dcp->index != 2)
-		return false;
-
 	return !route->dcp->active_typec_route &&
 	       !dcp_typec_route_fixed_output_busy(route);
 }
 
 static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
-				    bool usb4);
+				    struct mux_control *xbar);
 static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route);
 static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port);
-
-static struct mux_control *
-dcp_typec_route_mux(struct apple_dcp_typec_route *route)
-{
-	if (route->usb4_selected && route->usb4_xbar)
-		return route->usb4_xbar;
-	return route->xbar;
-}
 
 /*
  * Pipelines are ranked by CRTC index so the fabric's choice is a pure function
@@ -253,29 +191,11 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
-/*
- * USB4 DP IN: prefer the USB-C dcpext. HDMI PHY 3 trains the empty jack;
- * ATC 2 in USB4 has no firmware DPTX object. Analog/AUX into adapter 0:5
- * is ACIO, so this DCP only selects the dpin mux.
- */
-static unsigned int dcp_typec_route_score_usb4(struct apple_dcp_typec_route *route)
-{
-	unsigned int score = dcp_typec_route_score(route);
-
-	if (route->dcp->fixed_phy)
-		score += 100;
-	return score;
-}
-
 static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
-				    bool usb4)
+				    struct mux_control *xbar)
 {
 	struct apple_dcp *dcp = route->dcp;
-	struct mux_control *mux;
 	int ret;
-
-	if (usb4 && !route->usb4_xbar)
-		return -ENODEV;
 
 	/*
 	 * The fixed output's HPD handler leaves disconnects to DCP, so the port
@@ -284,15 +204,20 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	 */
 	dcp_dptx_disconnect(dcp, 0);
 
-	if (dcp->fixed_route_selected && !usb4) {
+	if (dcp->fixed_route_selected) {
 		ret = mux_control_deselect(dcp->xbar);
 		if (ret)
 			return ret;
 		dcp->fixed_route_selected = false;
 	}
 
-	mux = usb4 ? route->usb4_xbar : route->xbar;
-	ret = mux_control_select(mux, route->mux_index);
+	/*
+	 * Thunderbolt DP IN: the crossbar connection may only be brought up
+	 * once DCP has configured the link and the tunnel pixel clock runs
+	 * (see dcp_tunnel_crossbar_up()). Just remember the output here.
+	 * Ported from aurora-silicon/linux#8.
+	 */
+	ret = xbar == route->xbar ? mux_control_select(xbar, route->mux_index) : 0;
 	if (ret) {
 		if (dcp->xbar) {
 			int restore_ret;
@@ -308,21 +233,9 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 		}
 		return ret;
 	}
-	route->usb4_selected = usb4;
 
 	dcp->phy = route->phy;
-	/*
-	 * USB4: digital into the USB-C dpin mux. Do not bind HDMI PHY 3
-	 * or ATC 2. Desktop DT uses apple,dptx-phy=4 for lpdptxphy
-	 * (phy@39c000000), the dedicated DPTX that macOS calls
-	 * AppleT602XDPTXPort(lpdptx-phy0).
-	 */
-	if (usb4 && usb4_atc >= 0)
-		dcp->dptx_phy = usb4_atc;
-	else if (usb4)
-		dcp->dptx_phy = 4;
-	else
-		dcp->dptx_phy = route->dptx_phy;
+	dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	if (route->port->connector) {
 		route->port->connector->dcp = to_platform_device(dcp->dev);
@@ -344,24 +257,60 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 				drm_crtc_mask(&dcp->crtc->base);
 	}
 	dcp->active_typec_route = route;
+	scoped_guard(mutex, &dcp->tb_lock) {
+		route->active_xbar = xbar;
+		route->tunnel = xbar != route->xbar;
+		route->xbar_up = !route->tunnel;
+		dcp->dptx_tunnel = route->tunnel;
+		/* Crossbar controls are dpphy, dpin0, dpin1: same order as
+		 * the DFP port. */
+		dcp->dptx_dfp_port = route->tunnel ?
+			xbar - &route->xbar->chip->mux[0] : 0;
+		dcp->tb_clock_ok = false;
+	}
 	route->selected = true;
 
-	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u (%s)\n",
-		 dcp->dptx_phy, usb4 ? "USB4 DP IN, ACIO AUX" : "DP alt-mode");
+	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u\n", route->dptx_phy);
 	return 0;
 }
 
 static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 {
 	struct apple_dcp *dcp = route->dcp;
-	int ret;
+	int ret = 0;
 
-	ret = mux_control_deselect(dcp_typec_route_mux(route));
-	if (ret)
-		return ret;
+	/*
+	 * Under tb_lock so a DCP link (re)configuration can neither select
+	 * the crossbar nor restart the tunnel pixel clock behind our back.
+	 * Ported from aurora-silicon/linux#8.
+	 */
+	scoped_guard(mutex, &dcp->tb_lock) {
+		if (!route->tunnel || route->xbar_up)
+			ret = mux_control_deselect(route->active_xbar ?: route->xbar);
+		if (ret)
+			return ret;
+		route->xbar_up = false;
+
+		if (route->tunnel && dcp->phy) {
+			/* The tunnel pixel clock must not outlive the tunnel. */
+			typeof(&apple_atc_dp_tunnel_rate) stop =
+				symbol_get(apple_atc_dp_tunnel_rate);
+
+			if (stop) {
+				stop(dcp->phy, 0);
+				symbol_put(apple_atc_dp_tunnel_rate);
+			}
+		}
+		route->active_xbar = NULL;
+		route->tunnel = false;
+		dcp->dptx_tunnel = false;
+		dcp->dptx_dfp_port = 0;
+		dcp->tb_dpin_set_active = NULL;
+		dcp->tb_dpin_ctx = NULL;
+		dcp->tb_clock_ok = false;
+	}
 
 	route->selected = false;
-	route->usb4_selected = false;
 	if (dcp->active_typec_route == route)
 		dcp->active_typec_route = NULL;
 
@@ -447,6 +396,256 @@ static void dcp_typec_retrain_active_routes(void)
 	}
 }
 
+/*
+ * Thunderbolt DP tunnels, ported from aurora-silicon/linux#8. Crossbar
+ * connection up/down, looked up at runtime so appledrm does not require the
+ * crossbar driver to be built.
+ */
+static int dcp_dpxbar_link(struct mux_control *mux, bool up)
+{
+	typeof(&apple_dpxbar_link_up) fn;
+	int ret;
+
+	fn = up ? symbol_get(apple_dpxbar_link_up) :
+		  symbol_get(apple_dpxbar_link_down);
+	if (!fn)
+		return -ENOENT;
+	ret = fn(mux);
+	if (up)
+		symbol_put(apple_dpxbar_link_up);
+	else
+		symbol_put(apple_dpxbar_link_down);
+	return ret;
+}
+
+/* DP IN adapter handshake through the thunderbolt glue; tb_lock held. */
+static int dcp_tunnel_dpin_locked(struct apple_dcp *dcp, bool active)
+{
+	lockdep_assert_held(&dcp->tb_lock);
+	if (!dcp->tb_dpin_set_active)
+		return -ENODEV;
+	return dcp->tb_dpin_set_active(dcp->tb_dpin_ctx, active);
+}
+
+/*
+ * Thunderbolt DP IN, from DCP's DidChangeLinkConfiguration once a link rate
+ * is set: bring the crossbar connection up (FIFO/PCLK/ATC enables) now that
+ * the tunnel pixel clock runs, and re-assert the DP IN adapter's
+ * DPTX_INACTIVE=0 afterwards. The first time this is the mux selection;
+ * after a re-link only the clocks are brought back (the mux selection and
+ * the ATC output enable are kept, see dcp_tunnel_crossbar_down()). Runs
+ * inside a DCP apcall: only tb_lock, which nobody holds across a DCP call.
+ */
+int dcp_tunnel_crossbar_up(struct apple_dcp *dcp)
+{
+	struct apple_dcp_typec_route *route;
+	int ret;
+
+	guard(mutex)(&dcp->tb_lock);
+	route = dcp->active_typec_route;
+	if (!route || !route->tunnel || !route->active_xbar)
+		return -ENODEV;
+	if (!dcp->tb_clock_ok) {
+		dev_warn(dcp->dev, "no DP tunnel pixel clock, crossbar left down\n");
+		return -EIO;
+	}
+	if (!route->xbar_up) {
+		/* Never block a DCP call on the mux semaphore. */
+		ret = mux_control_try_select(route->active_xbar, route->mux_index);
+		if (!ret)
+			route->xbar_up = true;
+	} else {
+		ret = dcp_dpxbar_link(route->active_xbar, true);
+	}
+	if (ret) {
+		dev_warn(dcp->dev, "DP tunnel crossbar up failed: %d\n", ret);
+		return ret;
+	}
+	return dcp_tunnel_dpin_locked(dcp, true);
+}
+
+/*
+ * Thunderbolt DP IN, from DCP's WillChangeLinkConfiguration on an
+ * established link: DP IN inactive, crossbar clocks down (mux selection and
+ * ATC output enable kept). DP IN goes active again in
+ * dcp_tunnel_crossbar_up().
+ */
+int dcp_tunnel_crossbar_down(struct apple_dcp *dcp)
+{
+	struct apple_dcp_typec_route *route;
+
+	guard(mutex)(&dcp->tb_lock);
+	route = dcp->active_typec_route;
+	if (!route || !route->tunnel || !route->xbar_up)
+		return 0;
+	dcp_tunnel_dpin_locked(dcp, false);
+	return dcp_dpxbar_link(route->active_xbar, false);
+}
+
+/*
+ * Thunderbolt DP IN, from DCP's SetLinkRate: start (rate != 0) or stop the
+ * tunnel pixel clock. A stopped clock also takes the crossbar connection
+ * down.
+ */
+int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 link_rate)
+{
+	typeof(&apple_atc_dp_tunnel_rate) fn;
+	struct apple_dcp_typec_route *route;
+	int ret;
+
+	guard(mutex)(&dcp->tb_lock);
+	if (!dcp->dptx_tunnel)
+		return -ENODEV;
+	fn = symbol_get(apple_atc_dp_tunnel_rate);
+	if (!fn) {
+		dev_err(dcp->dev, "phy-apple-atc not loaded, no DP tunnel clock\n");
+		return -ENOENT;
+	}
+	route = dcp->active_typec_route;
+	if (!link_rate && route && route->xbar_up)
+		dcp_dpxbar_link(route->active_xbar, false);
+	ret = fn(phy, link_rate);
+	symbol_put(apple_atc_dp_tunnel_rate);
+	dcp->tb_clock_ok = !ret && link_rate;
+	if (ret)
+		dev_warn(dcp->dev, "DP tunnel pixel clock (rate 0x%x) failed: %d\n",
+			 link_rate, ret);
+	return ret;
+}
+
+/* Thunderbolt DP IN: DCP Activate/Deactivate. */
+int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, bool active)
+{
+	guard(mutex)(&dcp->tb_lock);
+	if (!dcp->dptx_tunnel)
+		return 0;
+	return dcp_tunnel_dpin_locked(dcp, active);
+}
+
+/*
+ * Thunderbolt DP tunnels: the host router's DP IN adapters sit behind the
+ * crossbar's dpin0/dpin1 outputs of the port's ATC. When the Thunderbolt
+ * connection manager has set up a tunnel from one of them, route a free
+ * display pipeline there and tell DCP a display is attached, so it trains
+ * the link (and completes DPRX) through the tunnel.
+ */
+int apple_dcp_tb_dp_tunnel(struct device_node *connector_np, unsigned int dpin,
+			   bool active, int (*set_active)(void *ctx, bool active),
+			   void *ctx)
+{
+	struct apple_dcp_typec_port *port = NULL, *pos;
+	struct apple_dcp_typec_route *candidate, *best = NULL;
+	unsigned int best_score = UINT_MAX;
+	struct mux_control *ctl;
+	struct apple_dcp *dcp;
+	int ret;
+
+	if (!connector_np || dpin > 1)
+		return -EINVAL;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+
+	list_for_each_entry(pos, &dcp_typec_ports, link) {
+		if (pos->connector_np == connector_np) {
+			port = pos;
+			break;
+		}
+	}
+	if (!port)
+		return -ENODEV;
+
+	if (!active) {
+		if (!port->owner || !port->owner->tunnel ||
+		    port->owner->tunnel_dpin != dpin)
+			return 0;
+		dcp = port->owner->dcp;
+		if (port->hpd || dcp->typec_cable_connected)
+			dcp_dptx_disconnect_oob(to_platform_device(dcp->dev), 0);
+		port->hpd = false;
+		ret = dcp_typec_route_deactivate(port->owner);
+		if (ret) {
+			/* The caller's context is going away regardless. */
+			scoped_guard(mutex, &dcp->tb_lock) {
+				dcp->dptx_tunnel = false;
+				dcp->tb_dpin_set_active = NULL;
+				dcp->tb_dpin_ctx = NULL;
+			}
+			return ret;
+		}
+		port->owner = NULL;
+		/* Re-apply the next Type-C mux state in full. */
+		port->applied_valid = false;
+		if (dcp->hdmi_hpd && dcp->active &&
+		    gpiod_get_value_cansleep(dcp->hdmi_hpd))
+			dcp_dptx_connect(dcp, 0);
+		return 0;
+	}
+
+	if (port->owner) {
+		if (port->owner->tunnel && port->owner->tunnel_dpin == dpin)
+			return 0;
+		dev_warn(port->owner->dcp->dev,
+			 "port already routed, not taking DP tunnel dpin%u\n", dpin);
+		return -EBUSY;
+	}
+
+	list_for_each_entry(candidate, &port->routes, port_link) {
+		unsigned int score;
+
+		if (!dcp_typec_route_available(candidate))
+			continue;
+		score = dcp_typec_route_score(candidate);
+		if (score < best_score) {
+			best = candidate;
+			best_score = score;
+		}
+	}
+	if (!best)
+		return -EBUSY;
+
+	/* The route's crossbar control is dpphy (0); dpin0/dpin1 are 1/2. */
+	if (best->xbar != &best->xbar->chip->mux[0] ||
+	    best->xbar->chip->controllers < 3)
+		return -EOPNOTSUPP;
+	ctl = &best->xbar->chip->mux[1 + dpin];
+
+	dcp = best->dcp;
+	scoped_guard(mutex, &dcp->tb_lock) {
+		dcp->tb_dpin_set_active = set_active;
+		dcp->tb_dpin_ctx = ctx;
+	}
+	best->tunnel_dpin = dpin;
+	ret = dcp_typec_route_activate(best, ctl);
+	if (ret) {
+		scoped_guard(mutex, &dcp->tb_lock) {
+			dcp->tb_dpin_set_active = NULL;
+			dcp->tb_dpin_ctx = NULL;
+		}
+		return ret;
+	}
+	port->owner = best;
+
+	dev_info(dcp->dev, "display routed to Thunderbolt DP tunnel dpin%u\n", dpin);
+
+	/*
+	 * The DP IN adapter may only be woken (DPTX_INACTIVE=0) while DCP
+	 * drives the DPTX, i.e. from DCP's Activate call; waking it earlier
+	 * hangs the machine (confirmed independently by this project's own
+	 * AFK ordered-workqueue deadlock finding). dptxep calls set_active
+	 * back from Activate and Deactivate (set above, before the route
+	 * became a tunnel).
+	 */
+	if (!dcp->typec_connector)
+		dev_warn(dcp->dev, "no Type-C connector for the DP tunnel\n");
+	WRITE_ONCE(dcp->typec_cable_connected, true);
+	port->hpd = true;
+	if (dcp->typec_connector)
+		dcp_dptx_connect_oob(to_platform_device(dcp->dev), 0);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_dcp_tb_dp_tunnel);
+
 static int dcp_typec_route_set(struct typec_mux_dev *mux,
 			       struct typec_mux_state *state)
 {
@@ -484,18 +683,22 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 	port->applied_valid = true;
 
 	dev_info(route->dcp->dev,
-		 "typec mux set typec%u alt=%p svid=%04x mode=%lu dp=%d usb4=%d tbt=%d usb4_xbar=%s\n",
+		 "typec mux set typec%u alt=%p svid=%04x mode=%lu dp=%d usb4=%d tbt=%d\n",
 		 route->typec_index, state->alt,
 		 state->alt ? state->alt->svid : 0, state->mode, is_dp,
 		 state->mode == TYPEC_MODE_USB4,
-		 state->alt && state->alt->svid == USB_TYPEC_TBT_SID,
-		 route->usb4_xbar ? "yes" : "no");
+		 state->alt && state->alt->svid == USB_TYPEC_TBT_SID);
 
 	if (!is_dp) {
-		bool usb4 = state->mode == TYPEC_MODE_USB4 ||
-			    (state->alt && state->alt->svid == USB_TYPEC_TBT_SID);
+		/*
+		 * A Thunderbolt/USB4 DP tunnel is torn down by its own path
+		 * (apple_dcp_tb_dp_tunnel()), not by a Type-C mux notification.
+		 * Ported from aurora-silicon/linux#8.
+		 */
+		if (port->owner && port->owner->tunnel)
+			return 0;
 
-		if (port->owner && !(usb4 && port->owner->usb4_selected)) {
+		if (port->owner) {
 			struct apple_dcp *dcp = port->owner->dcp;
 
 			if (port->hpd || dcp->typec_cable_connected ||
@@ -511,56 +714,18 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 			    gpiod_get_value_cansleep(dcp->hdmi_hpd))
 				dcp_dptx_connect(dcp, 0);
 		}
+		dcp_typec_retrain_active_routes();
+		return 0;
+	}
 
-		if (!usb4) {
-			dcp_typec_retrain_active_routes();
-			return 0;
-		}
-
-		/*
-		 * USB4: DP is tunneled through ACIO DP IN, not the ATC PHY.
-		 * Select the optional dpin mux and start DPTX so DPRX can
-		 * complete on the USB4 DP tunnel (0:5 <-> hub DP OUT).
-		 */
-		if (!port->owner) {
-			list_for_each_entry(candidate, &port->routes, port_link) {
-				unsigned int score;
-
-				if (!candidate->usb4_xbar)
-					continue;
-				if (!dcp_typec_route_available(candidate))
-					continue;
-				score = dcp_typec_route_score_usb4(candidate);
-				if (score < best_score) {
-					best = candidate;
-					best_score = score;
-				}
-			}
-
-			if (!best) {
-				dev_info(route->dcp->dev,
-					 "USB4/TBT on typec%u: no DP IN mux candidate\n",
-					 route->typec_index);
-				dcp_typec_retrain_active_routes();
-				return 0;
-			}
-
-			ret = dcp_typec_route_activate(best, true);
-			if (ret)
-				return ret;
-			port->owner = best;
-		}
-
-		if (port->owner && port->owner->usb4_selected) {
-			struct apple_dcp *dcp = port->owner->dcp;
-
-			/* dpin mux is up. Wait for Thunderbolt DP IN HPD. */
-			WRITE_ONCE(dcp->typec_cable_connected, true);
-			port->hpd = true;
-			dev_info(dcp->dev,
-				 "USB4 dpin mux typec%u; waiting for DP IN HPD\n",
-				 port->owner->typec_index);
-		}
+	/*
+	 * A Thunderbolt DP tunnel still owns the port (its teardown is on the
+	 * way): don't act on or remember this state; the tunnel teardown
+	 * drops what was recorded so the next update is applied. Ported from
+	 * aurora-silicon/linux#8.
+	 */
+	if (port->owner && port->owner->tunnel) {
+		port->applied_valid = false;
 		return 0;
 	}
 
@@ -580,7 +745,7 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 		if (!best)
 			return -EBUSY;
 
-		ret = dcp_typec_route_activate(best, false);
+		ret = dcp_typec_route_activate(best, best->xbar);
 		if (ret)
 			return ret;
 		port->owner = best;
@@ -605,161 +770,6 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 	port->hpd = hpd;
 
 	return 0;
-}
-
-static int dcp_tb_child_has_device(struct device *dev, void *data)
-{
-	int *found = data;
-	const char *name = dev_name(dev);
-
-	if (strchr(name, '-') && !strchr(name, ':') && strcmp(name, "0-0")) {
-		*found = 1;
-		return 1;
-	}
-	if (device_for_each_child(dev, data, dcp_tb_child_has_device))
-		return 1;
-	return 0;
-}
-
-static bool dcp_typec_nhi_has_tb_device(int typec_index)
-{
-	static const char *const nhi_names[] = {
-		"701f00000.nhi",
-		"b01f00000.nhi",
-		"f01f00000.nhi",
-	};
-	struct device *nhi;
-	int found = 0;
-
-	if (typec_index < 0 || typec_index >= ARRAY_SIZE(nhi_names))
-		return false;
-	nhi = bus_find_device_by_name(&platform_bus_type, NULL,
-				      nhi_names[typec_index]);
-	if (!nhi)
-		return false;
-	device_for_each_child(nhi, &found, dcp_tb_child_has_device);
-	put_device(nhi);
-	return found;
-}
-
-static int dcp_usb4_arm_typec(int typec_index)
-{
-	struct apple_dcp_typec_port *port, *target = NULL;
-	struct apple_dcp_typec_route *route, *candidate, *best = NULL;
-	unsigned int best_score = UINT_MAX;
-	int ret = 0;
-
-	mutex_lock(&dcp_typec_fabric_lock);
-	list_for_each_entry(port, &dcp_typec_ports, link) {
-		list_for_each_entry(route, &port->routes, port_link) {
-			if (route->typec_index == (u32)typec_index) {
-				target = port;
-				break;
-			}
-		}
-		if (target)
-			break;
-	}
-	if (!target) {
-		mutex_unlock(&dcp_typec_fabric_lock);
-		return -ENODEV;
-	}
-
-	if (target->owner && !target->owner->usb4_selected) {
-		struct apple_dcp *dcp = target->owner->dcp;
-
-		if (target->hpd || dcp->typec_cable_connected)
-			dcp_dptx_disconnect_oob(to_platform_device(dcp->dev), 0);
-		dcp_typec_route_deactivate(target->owner);
-		target->owner = NULL;
-		target->hpd = false;
-	}
-
-	if (!target->owner) {
-		list_for_each_entry(candidate, &target->routes, port_link) {
-			unsigned int score;
-
-			if (candidate->typec_index != (u32)typec_index)
-				continue;
-			if (!candidate->usb4_xbar)
-				continue;
-			if (!dcp_typec_route_available(candidate))
-				continue;
-			score = dcp_typec_route_score_usb4(candidate);
-			if (score < best_score) {
-				best = candidate;
-				best_score = score;
-			}
-		}
-		if (!best) {
-			mutex_unlock(&dcp_typec_fabric_lock);
-			pr_info("appledrm: USB4 arm typec%u: no DP IN mux\n",
-				typec_index);
-			return -ENODEV;
-		}
-		ret = dcp_typec_route_activate(best, true);
-		if (ret) {
-			mutex_unlock(&dcp_typec_fabric_lock);
-			return ret;
-		}
-		target->owner = best;
-	}
-
-	if (target->owner && target->owner->usb4_selected) {
-		struct apple_dcp *dcp = target->owner->dcp;
-
-		WRITE_ONCE(dcp->typec_cable_connected, true);
-		target->hpd = true;
-		dcp->typec_reconnect_tries = 0;
-		cancel_delayed_work(&dcp->typec_reconnect_wq);
-		mod_delayed_work(system_freezable_wq, &dcp->typec_reconnect_wq,
-				 DPTX_USB4_CONNECT_DELAY);
-		usb4_armed_dcp = dcp;
-		dev_info(dcp->dev,
-			 "USB4 DP IN armed typec%u; DPTX HPD in %u ms (no PHY connect)\n",
-			 typec_index, jiffies_to_msecs(DPTX_USB4_CONNECT_DELAY));
-	}
-	mutex_unlock(&dcp_typec_fabric_lock);
-	return 0;
-}
-
-static void dcp_usb4_auto_arm_work(struct work_struct *work);
-static DECLARE_DELAYED_WORK(dcp_usb4_auto_arm_wq, dcp_usb4_auto_arm_work);
-
-static void dcp_usb4_auto_arm_work(struct work_struct *work)
-{
-	int *hpd, *idx;
-	int typec;
-
-	if (usb4_arm >= 0) {
-		dcp_usb4_arm_typec(usb4_arm);
-		return;
-	}
-
-	hpd = __symbol_get("tb_apple_dp_in_hpd");
-	idx = __symbol_get("tb_apple_dp_typec_index");
-	if (!hpd || !idx) {
-		if (hpd)
-			__symbol_put("tb_apple_dp_in_hpd");
-		if (idx)
-			__symbol_put("tb_apple_dp_typec_index");
-		mod_delayed_work(system_freezable_wq, &dcp_usb4_auto_arm_wq,
-				 msecs_to_jiffies(500));
-		return;
-	}
-	if (*hpd && *idx >= 0) {
-		typec = *idx;
-		pr_info("appledrm: DP IN HPD=1 typec%u, dpin mux only (ACIO AUX, no DPTX PHY)\n",
-			typec);
-		__symbol_put("tb_apple_dp_in_hpd");
-		__symbol_put("tb_apple_dp_typec_index");
-		dcp_usb4_arm_typec(typec);
-		return;
-	}
-	__symbol_put("tb_apple_dp_in_hpd");
-	__symbol_put("tb_apple_dp_typec_index");
-	mod_delayed_work(system_freezable_wq, &dcp_usb4_auto_arm_wq,
-			 msecs_to_jiffies(500));
 }
 
 static struct apple_dcp_typec_port *
@@ -890,9 +900,6 @@ static void dcp_typec_route_unregister(void *data)
 	struct apple_dcp_typec_port *port = route->port;
 
 	typec_mux_unregister(route->typec_mux);
-	if (route->usb4_xbar && !route->usb4_xbar_borrowed)
-		mux_control_put(route->usb4_xbar);
-	route->usb4_xbar = NULL;
 
 	guard(mutex)(&dcp_typec_fabric_lock);
 	if (port->owner == route) {
@@ -968,34 +975,12 @@ static int dcp_register_typec_routes(struct apple_dcp *dcp)
 			return dev_err_probe(dev, PTR_ERR(route->xbar),
 					     "%pOF: failed to get display crossbar\n", route_np);
 
-		{
-			char usb4_name[16];
-			struct mux_control *usb4_mux;
-			struct mux_chip *chip;
-
-			snprintf(usb4_name, sizeof(usb4_name), "typec%u-usb4",
-				 route_index);
-			usb4_mux = mux_control_get_optional(dev, usb4_name);
-			if (IS_ERR(usb4_mux) &&
-			    PTR_ERR(usb4_mux) == -EPROBE_DEFER)
-				return -EPROBE_DEFER;
-			if (!IS_ERR_OR_NULL(usb4_mux)) {
-				route->usb4_xbar = usb4_mux;
-				route->usb4_xbar_borrowed = false;
-			} else if (route->xbar && route->xbar->chip &&
-				   usb4_dpin_index >= 0 &&
-				   usb4_dpin_index <
-					   (int)route->xbar->chip->controllers) {
-				chip = route->xbar->chip;
-				route->usb4_xbar = &chip->mux[usb4_dpin_index];
-				route->usb4_xbar_borrowed = true;
-				dev_info(dev,
-					 "typec%u USB4 DP IN using crossbar mux %d\n",
-					 route_index, usb4_dpin_index);
-			} else {
-				route->usb4_xbar = NULL;
-			}
-		}
+		/*
+		 * No per-route USB4/dpin crossbar lookup here any more:
+		 * apple_dcp_tb_dp_tunnel() computes the dpin0/dpin1 crossbar
+		 * controller dynamically from route->xbar->chip->mux[1+dpin]
+		 * at tunnel-creation time. Ported from aurora-silicon/linux#8.
+		 */
 
 		ret = of_property_read_u32_index(dev->of_node, "apple,typec-mux-indices",
 						 route_index, &route->mux_index);
@@ -1059,8 +1044,6 @@ static int dcp_register_typec_routes(struct apple_dcp *dcp)
 		return dev_err_probe(dev, -EINVAL, "Type-C route container is empty\n");
 
 	dcp->phy_managed_by_typec = true;
-	mod_delayed_work(system_freezable_wq, &dcp_usb4_auto_arm_wq,
-			 msecs_to_jiffies(2000));
 	return 0;
 }
 
@@ -1380,154 +1363,8 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
 #define DPTX_RECONNECT_RETRIES 1
 
-static struct phy *usb4_lpdptx_phy;
-
-static void dcp_usb4_enable_lpdptxphy(struct apple_dcp *dcp)
-{
-	static bool tried;
-	struct device_node *np;
-	struct platform_device *pdev;
-	struct resource res[2];
-	struct of_phandle_args args = { };
-	int nres = 0, ret;
-
-	if (tried)
-		return;
-	tried = true;
-
-	request_module("phy_apple_dptx");
-	np = of_find_compatible_node(NULL, NULL, "apple,t6020-dptx-phy");
-	if (!np) {
-		dev_info(dcp->dev, "USB4: no lpdptxphy DT node\n");
-		return;
-	}
-	pdev = of_find_device_by_node(np);
-	if (pdev) {
-		dev_info(dcp->dev, "USB4: lpdptxphy already instantiated\n");
-		put_device(&pdev->dev);
-		of_node_put(np);
-		return;
-	}
-	/*
-	 * of_platform_device_create() skips status=disabled. Attach the
-	 * existing DT node (phy@39c000000) as a platform device.
-	 */
-	pdev = platform_device_alloc("phy-apple-dptx", PLATFORM_DEVID_NONE);
-	if (!pdev) {
-		of_node_put(np);
-		dev_warn(dcp->dev, "USB4: platform_device_alloc lpdptxphy failed\n");
-		return;
-	}
-	if (!of_address_to_resource(np, 0, &res[nres]))
-		nres++;
-	if (!of_address_to_resource(np, 1, &res[nres]))
-		nres++;
-	ret = platform_device_add_resources(pdev, res, nres);
-	if (ret) {
-		dev_warn(dcp->dev, "USB4: lpdptxphy resources: %d\n", ret);
-		platform_device_put(pdev);
-		of_node_put(np);
-		return;
-	}
-	pdev->dev.of_node = np;
-	ret = platform_device_add(pdev);
-	if (ret) {
-		dev_warn(dcp->dev, "USB4: platform_device_add lpdptxphy: %d\n",
-			 ret);
-		platform_device_put(pdev);
-		return;
-	}
-	dev_info(dcp->dev, "USB4: instantiated lpdptxphy %s\n",
-		 dev_name(&pdev->dev));
-	wait_for_device_probe();
-	args.np = np;
-	usb4_lpdptx_phy = of_phy_simple_xlate(&pdev->dev, &args);
-	if (IS_ERR_OR_NULL(usb4_lpdptx_phy)) {
-		usb4_lpdptx_phy = phy_get(&pdev->dev, NULL);
-		if (IS_ERR(usb4_lpdptx_phy))
-			usb4_lpdptx_phy = NULL;
-	}
-	if (usb4_lpdptx_phy)
-		dev_info(dcp->dev, "USB4: got lpdptxphy phy\n");
-	else
-		dev_warn(dcp->dev, "USB4: lpdptxphy bound but phy_get failed\n");
-}
-
-static int dcp_usb4_protocol_connect(struct apple_dcp *dcp, u32 port)
-{
-	struct apple_dcp_typec_route *route = dcp->active_typec_route;
-	struct dptx_port *dptx = &dcp->dptxport[port];
-	struct apple_epic_service *svc = dptx->service;
-	u8 atc = usb4_native_dpin ? 2 : 0;
-	int ret;
-
-	/* Native test: right DPIN0; retain left-back for the protocol-only probe. */
-	if (!route || !route->usb4_selected || !route->usb4_xbar ||
-	    route->typec_index != atc || port != 0 || usb4_dpin_index != 1 ||
-	    dcp->index != 2 || dcp->dptx_die != 0 ||
-	    usb4_force_dptx || !dptx->enabled || !svc)
-		return -EINVAL;
-
-	mutex_lock(&dcp->hpd_mutex);
-	/* ACTIVATE must never receive a PHY to configure in this experiment. */
-	if (dptx->atcphy) {
-		ret = -EBUSY;
-		goto out;
-	}
-	if (dptx->connected) {
-		ret = 0;
-		goto out;
-	}
-	if (atomic_cmpxchg(&usb4_protocol_probe_started, 0, 1)) {
-		ret = -EALREADY;
-		goto out;
-	}
-
-	reinit_completion(&dptx->linkcfg_completion);
-	reinit_completion(&dptx->usb4_lane_completion);
-	dptx->lane_count = 0;
-	dev_info(dcp->dev, "USB4 protocol probe: target=0x%x typec%u, PHY absent, one attempt\n",
-		 0x8001 | (atc << 4), atc);
-	ret = dptxport_validate_connection(svc, 1, atc, dcp->dptx_die);
-	dev_info(dcp->dev, "USB4 protocol probe: validate=%d\n", ret);
-	if (ret)
-		goto out;
-	ret = dptxport_connect(svc, 1, atc, dcp->dptx_die, true);
-	dev_info(dcp->dev, "USB4 protocol probe: connect=%d\n", ret);
-	if (ret)
-		goto out;
-	ret = dptxport_request_display(svc);
-	dev_info(dcp->dev, "USB4 protocol probe: request_display=%d modes=%u\n",
-		 ret, dcp->nr_modes);
-	if (ret)
-		goto out;
-	/* Record ownership so ordinary unplug releases this request. */
-	dptx->connected = true;
-
-	/* Native candidate reselects inside ACTIVATE before the DP-IN handshake. */
-	if (usb4_native_dpin)
-		goto assert_hpd;
-
-	/* Retain the existing post-reset crossbar selection for this comparison. */
-	mux_control_deselect(route->usb4_xbar);
-	ret = mux_control_select(route->usb4_xbar, route->mux_index);
-	dev_info(dcp->dev, "USB4 protocol probe: reselect=%d\n", ret);
-	if (ret)
-		goto out;
-
-assert_hpd:
-	/* One HPD assertion, after power, as in the working physical DP path. */
-	ret = dptxport_set_hpd_timeout(svc, true, 8000);
-	dev_info(dcp->dev, "USB4 protocol probe: HPD=%d cached_lanes=%u modes=%u\n",
-		 ret, dptx->lane_count, dcp->nr_modes);
-out:
-	mutex_unlock(&dcp->hpd_mutex);
-	return ret;
-}
-
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
-	bool usb4 = false;
 	int ret = 0;
 
 	if (!dcp->phy) {
@@ -1535,146 +1372,11 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		return -ENODEV;
 	}
 	dev_info(dcp->dev,
-		 "%s(port=%d) target=%u:%u typec=%d route=%s conn_type=%d connected=%d\n",
+		 "%s(port=%d) target=%u:%u dfp=%u typec=%d route=%s conn_type=%d connected=%d\n",
 		 __func__, port, dcp->dptx_die, dcp->dptx_phy,
-		 dcp_is_typec_output(dcp),
+		 dcp->dptx_dfp_port, dcp_is_typec_output(dcp),
 		 dcp->active_typec_route ? "borrowed" : "fixed",
 		 dcp->connector_type, dcp->dptxport[port].connected);
-
-	/*
-	 * dcp_usb4_protocol_connect()'s own "atc" target-address field uses
-	 * a hardcoded encoding (usb4_native_dpin ? 2 : 0) that was only ever
-	 * validated against the right port (typec_index==2, where it
-	 * happened to match); its actual relationship to typec_index for
-	 * other ports is not established, unlike the address-level fixes in
-	 * dcp_usb4_native_route()/apple_usb4_dpin0_set_active()/the crossbar
-	 * and ATC PHY checks, which are a confirmed, regular per-port
-	 * pattern. Rather than guess at that encoding, scope this one-shot
-	 * experimental probe to the right port only, same as before, and
-	 * let any other port fall through to the main native-DPIN0 path
-	 * below, which is fully port-generic.
-	 */
-	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe &&
-	    dcp->active_typec_route && dcp->active_typec_route->typec_index == 2)
-		return dcp_usb4_protocol_connect(dcp, port);
-
-	if (dcp_is_usb4_output(dcp) && !usb4_force_dptx) {
-		/*
-		 * 0078 hub-from-init blanked eDP. Instantiating
-		 * phy-apple-dptx can write lpdptxphy core+0x10. Stay on
-		 * 0x9001 unit 0, connect unk 0x100. 0081 ATC AUX did
-		 * not start SET_LINK_RATE (analog 0x17). Raise DCP
-		 * firmware log mask so AppleDCPDPTX after the nub is
-		 * visible. No analog MMIO, no ATC AUX.
-		 */
-		dev_info(dcp->dev,
-			 "USB4: skip lpdptxphy instantiate (eDP stays on)\n");
-		dcp_usb4_verbose_logs(dcp);
-		if (dcp->dptxport[port].enabled && dcp->dptxport[port].service) {
-			u8 cores[2];
-			u8 atc = (usb4_atc >= 0) ? usb4_atc : 0;
-			u32 bind = port;
-			int n = 0, i, v = -EINVAL, c = -EINVAL, h = -EINVAL,
-			    r = -EINVAL;
-			struct apple_dcp_typec_route *dp_route =
-				dcp->active_typec_route;
-			bool have_phy = dp_route && dp_route->phy;
-
-			cores[n++] = (usb4_core == 2) ? 2 : 1;
-			cores[n++] = (cores[0] == 1) ? 2 : 1;
-			dev_info(dcp->dev,
-				 "USB4: analog DPIN bind port=%u (unit %u)\n",
-				 bind, dcp->dptxport[bind].unit);
-			/*
-			 * Give DCP firmware a real PHY to train against
-			 * instead of leaving dptxport[bind].atcphy NULL --
-			 * with it NULL, dptxport_call_get_max_lane_count()
-			 * short-circuits to a fixed 4-lane analog answer and
-			 * DCP is never given anything to negotiate against.
-			 * route->phy is the per-port ATC PHY (the same one
-			 * usb4_dptx_set() already uses safely, distinct from
-			 * the shared lpdptxphy that also drives eDP).
-			 *
-			 * Do NOT switch this PHY to PHY_MODE_DP: this is a
-			 * genuine USB4 tunnel, and both the reference PR
-			 * (aurora-silicon/linux#8) and our own tunnel-clock
-			 * code (apple_atc_right_usb4_tunnel_rate(), gated on
-			 * atcphy->mode == APPLE_ATCPHY_MODE_USB4) require the
-			 * PHY to stay in USB4/TBT mode for the whole
-			 * connection -- switching it to DP mode reconfigures
-			 * the SERDES lanes for direct DisplayPort signaling,
-			 * which is not what a tunneled AUX/DPRX path needs.
-			 * Every candidate through 0125 has set this
-			 * unconditionally at connect time, before DCP ever
-			 * gets to ACTIVATE/SET_LINK_RATE.
-			 */
-			if (have_phy)
-				dcp->dptxport[bind].atcphy = dp_route->phy;
-			mutex_lock(&dcp->hpd_mutex);
-			for (i = 0; i < n; i++) {
-				u8 core = cores[i];
-				struct apple_epic_service *svc =
-					dcp->dptxport[bind].service;
-
-				v = dptxport_validate_connection(
-					svc, core, atc, dcp->dptx_die);
-				dev_info(dcp->dev,
-					 "USB4: analog DPIN validate core=%u atc=%u: %d\n",
-					 core, atc, v);
-				if (v)
-					continue;
-				c = dptxport_connect(svc, core, atc,
-						     dcp->dptx_die, true);
-				dev_info(dcp->dev,
-					 "USB4: analog DPIN connect core=%u atc=%u HPD: %d\n",
-					 core, atc, c);
-				if (!c)
-					h = dptxport_set_hpd(svc, true);
-				dev_info(dcp->dev,
-					 "USB4: analog DPIN set_hpd: %d\n", h);
-				if (!h) {
-					dev_info(dcp->dev,
-						 "USB4: before request_display nr_modes=%u valid_mode=%d\n",
-						 dcp->nr_modes, dcp->valid_mode);
-					r = dptxport_request_display(svc);
-					dev_info(dcp->dev,
-						 "USB4: analog DPIN request_display core=%u atc=%u: %d\n",
-						 core, atc, r);
-					/*
-					 * request_display resets DCP pmgr 0x25.
-					 * Re-apply dpin (including dispext enable)
-					 * after that reset.
-					 */
-					if (!r && dcp->active_typec_route &&
-					    dcp->active_typec_route->usb4_xbar) {
-						struct apple_dcp_typec_route *route =
-							dcp->active_typec_route;
-						int m;
-
-						mux_control_deselect(route->usb4_xbar);
-						m = mux_control_select(route->usb4_xbar,
-								       route->mux_index);
-						dev_info(dcp->dev,
-							 "USB4: reselect dpin after nub: %d\n",
-							 m);
-						/*
-						 * The post-request HPD retry was already
-						 * tested: the device timed out after 5s.
-						 * Keep only the pre-request HPD above.
-						 */
-					}
-				}
-				break;
-			}
-			mutex_unlock(&dcp->hpd_mutex);
-			if (v)
-				dev_info(dcp->dev,
-					 "USB4: analog DPIN CORE 1 and 2 validate failed\n");
-		}
-		return 0;
-	}
-	if (dcp_is_usb4_output(dcp))
-		dcp_usb4_enable_lpdptxphy(dcp);
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (!dcp->dptxport[port].enabled) {
@@ -1687,14 +1389,17 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
-	reinit_completion(&dcp->dptxport[port].usb4_lane_completion);
 	dcp->dptxport[port].usb4_inactive_sink = false;
-	usb4 = dcp_is_usb4_output(dcp);
-	if (usb4)
-		dcp->dptxport[port].atcphy = usb4_lpdptx_phy;
-	else
-		dcp->dptxport[port].atcphy = dcp->phy;
-	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
+	/*
+	 * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel uses
+	 * the exact same connect path as a direct alt-mode PHY. The only
+	 * differences are dcp->dptx_dfp_port (0 = dpphy, 1/2 = dpin0/dpin1,
+	 * set by dcp_typec_route_activate()) and dcp->phy already being the
+	 * route's own ATC PHY rather than a separate shared lpdptxphy.
+	 */
+	dcp->dptxport[port].atcphy = dcp->phy;
+	ret = dptxport_validate_connection(dcp->dptxport[port].service,
+					   dcp->dptx_dfp_port,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
 		dev_err(dcp->dev,
@@ -1703,9 +1408,10 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 	}
 
-	ret = dptxport_connect(dcp->dptxport[port].service, 0,
+	ret = dptxport_connect(dcp->dptxport[port].service,
+			       dcp->dptx_dfp_port,
 			       dcp->dptx_phy, dcp->dptx_die,
-		       dcp_is_typec_output(dcp) && !usb4);
+			       dcp_is_typec_output(dcp));
 	if (ret) {
 		dev_err(dcp->dev,
 			"dcp_dptx_connect: failed to connect DPTX target %u:%u: %d\n",
@@ -1721,7 +1427,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_release;
 	}
 	dcp->dptxport[port].connected = true;
-	if (dcp_is_typec_output(dcp) && !usb4) {
+	if (dcp_is_typec_output(dcp)) {
 		ret = dptxport_set_hpd(dcp->dptxport[port].service, true);
 		if (ret) {
 			dev_err(dcp->dev,
@@ -1733,25 +1439,6 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	}
 
 	mutex_unlock(&dcp->hpd_mutex);
-	if (usb4) {
-		ret = wait_for_completion_timeout(
-			&dcp->dptxport[port].usb4_lane_completion,
-			msecs_to_jiffies(8000));
-		if (!ret) {
-			dev_err(dcp->dev,
-				"dcp_dptx_connect: USB4 DPTX train timeout\n");
-			ret = -ETIMEDOUT;
-			goto out_disconnect;
-		}
-		dev_info(dcp->dev, "USB4: DPTX trained %u lanes%s\n",
-			 dcp->dptxport[port].lane_count,
-			 usb4_force_dptx ? "" : ", DRM hotplug suppressed");
-		if (!usb4_force_dptx)
-			return 0;
-		if (dcp->avep)
-			av_service_connect(dcp);
-		return 0;
-	}
 
 	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
 					  DPTX_CONNECT_TIMEOUT);
@@ -1786,309 +1473,6 @@ out_unlock:
 	mutex_unlock(&dcp->hpd_mutex);
 	return ret;
 }
-
-static void usb4_restore_edp_work(struct work_struct *work)
-{
-	usb4_force_dptx = false;
-	if (usb4_lpdptx_phy)
-		phy_set_mode_ext(usb4_lpdptx_phy, PHY_MODE_DP, 0);
-	if (usb4_armed_dcp)
-		dev_info(usb4_armed_dcp->dev,
-			 "USB4: auto-restore lpdptxphy DCP index 0 (eDP)\n");
-}
-
-static DECLARE_DELAYED_WORK(usb4_restore_edp_wq, usb4_restore_edp_work);
-
-static int usb4_dptx_train_set(const char *val, const struct kernel_param *kp)
-{
-	int v, ret;
-
-	ret = kstrtoint(val, 0, &v);
-	if (ret)
-		return ret;
-	if (v == 0) {
-		cancel_delayed_work_sync(&usb4_restore_edp_wq);
-		usb4_force_dptx = false;
-		if (usb4_lpdptx_phy)
-			phy_set_mode_ext(usb4_lpdptx_phy, PHY_MODE_DP, 0);
-		if (usb4_armed_dcp)
-			dev_info(usb4_armed_dcp->dev,
-				 "USB4: DPTX train off, lpdptxphy DCP index 0\n");
-		return 0;
-	}
-	if (v != 1)
-		return -EINVAL;
-	if (!usb4_armed_dcp)
-		return -ENODEV;
-
-	usb4_force_dptx = true;
-	dev_info(usb4_armed_dcp->dev,
-		 "USB4: user DPTX train (full analog; blanks eDP; auto-restore 10s)\n");
-	ret = dcp_dptx_connect(usb4_armed_dcp, 0);
-	schedule_delayed_work(&usb4_restore_edp_wq, 10 * HZ);
-	return ret ? ret : 0;
-}
-
-static const struct kernel_param_ops usb4_dptx_train_ops = {
-	.set = usb4_dptx_train_set,
-	.get = param_get_bool,
-};
-module_param_cb(usb4_dptx_train, &usb4_dptx_train_ops, &usb4_force_dptx, 0644);
-MODULE_PARM_DESC(usb4_dptx_train,
-		 "Write 1 after closing the lid to train USB4 DPTX (blanks eDP)");
-
-static int usb4_scanout_set(const char *val, const struct kernel_param *kp)
-{
-	struct apple_dcp *dcp = usb4_armed_dcp;
-	struct dcp_display_mode *dm;
-	struct drm_display_mode *src;
-	int v, ret;
-
-	ret = kstrtoint(val, 0, &v);
-	if (ret)
-		return ret;
-	if (v == 0) {
-		if (dcp && dcp->connector) {
-			WRITE_ONCE(dcp->connector->connected, false);
-			dcp->nr_modes = 0;
-			schedule_work(&dcp->connector->hotplug_wq);
-			dev_info(dcp->dev, "USB4: drop fake 1080p connector\n");
-		}
-		return 0;
-	}
-	if (v != 1)
-		return -EINVAL;
-	if (!dcp || !dcp->connector)
-		return -ENODEV;
-
-	src = drm_cvt_mode(dcp->connector->base.dev, 1920, 1080, 60, false,
-			   false, false);
-	if (!src)
-		return -ENOMEM;
-	dm = kzalloc(sizeof(*dm), GFP_KERNEL);
-	if (!dm) {
-		drm_mode_destroy(dcp->connector->base.dev, src);
-		return -ENOMEM;
-	}
-	dm->mode = *src;
-	drm_mode_destroy(dcp->connector->base.dev, src);
-	dm->mode.type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	drm_mode_set_name(&dm->mode);
-	dm->color_mode_id = 1;
-	dm->timing_mode_id = 2;
-	dcp->modes = dm;
-	dcp->nr_modes = 1;
-	WRITE_ONCE(dcp->connector->connected, true);
-	dev_info(dcp->dev,
-		 "USB4: fake 1920x1080 scanout (no request_display; 22/24 on 0:4)\n");
-	{
-		struct drm_crtc_state fake = { };
-		int mret;
-
-		fake.mode = dm->mode;
-		if (dcp->fw_compat == DCP_FIRMWARE_V_13_5)
-			mret = iomfb_modeset_v13_3(dcp, &fake);
-		else
-			mret = iomfb_modeset_v12_3(dcp, &fake);
-		dev_info(dcp->dev, "USB4: kernel iomfb_modeset %d\n", mret);
-	}
-	schedule_work(&dcp->connector->hotplug_wq);
-	return 0;
-}
-
-static int usb4_scanout;
-static const struct kernel_param_ops usb4_scanout_ops = {
-	.set = usb4_scanout_set,
-	.get = param_get_int,
-};
-module_param_cb(usb4_scanout, &usb4_scanout_ops, &usb4_scanout, 0644);
-MODULE_PARM_DESC(usb4_scanout,
-		 "Write 1 to advertise 1080p on USB4 without lpdptxphy");
-
-static int usb4_pipe_set(const char *val, const struct kernel_param *kp)
-{
-	struct apple_dcp *dcp = usb4_armed_dcp;
-	struct apple_dcp_typec_route *route;
-	int v, ret, h;
-
-	ret = kstrtoint(val, 0, &v);
-	if (ret)
-		return ret;
-	if (v == 0)
-		return 0;
-	if (v != 1)
-		return -EINVAL;
-	if (!dcp)
-		return -ENODEV;
-
-	dev_info(dcp->dev,
-		 "USB4: pipe power (handle 0, no modeset, no lpdptxphy)\n");
-	switch (dcp->fw_compat) {
-	case DCP_FIRMWARE_V_12_3:
-		iomfb_poweron_pipe_v12_3(dcp);
-		break;
-	case DCP_FIRMWARE_V_13_5:
-		iomfb_poweron_pipe_v13_3(dcp);
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
-
-	route = dcp->active_typec_route;
-	if (route && route->usb4_xbar) {
-		mux_control_deselect(route->usb4_xbar);
-		ret = mux_control_select(route->usb4_xbar, route->mux_index);
-		dev_info(dcp->dev, "USB4: reselect dpin after pipe power: %d\n",
-			 ret);
-	}
-	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
-		h = dptxport_set_hpd_timeout(dcp->dptxport[0].service, true,
-					     8000);
-		dev_info(dcp->dev, "USB4: set_hpd after pipe power: %d\n", h);
-	}
-	return 0;
-}
-
-static int usb4_dptx_set(const char *val, const struct kernel_param *kp)
-{
-	struct apple_dcp *dcp = usb4_armed_dcp;
-	struct apple_dcp_typec_route *route;
-	int v, ret, h;
-
-	ret = kstrtoint(val, 0, &v);
-	if (ret)
-		return ret;
-	if (v == 0)
-		return 0;
-	if (v != 1)
-		return -EINVAL;
-	if (!dcp)
-		return -ENODEV;
-
-	route = dcp->active_typec_route;
-	if (!route || !route->phy)
-		return -ENODEV;
-
-	/*
-	 * The USB4 DP tunnel is already up. This is the transmitter:
-	 * DP pixel clocks in the ATC PHY, SS lanes left in USB4, then
-	 * HPD so DCPDPDevice starts against that clock. Not lpdptxphy.
-	 */
-	dcp->dptxport[0].atcphy = route->phy;
-	dev_info(dcp->dev, "USB4: fire DPTX clocks on typec%u\n",
-		 route->typec_index);
-	ret = phy_set_mode_ext(route->phy, PHY_MODE_DP, dcp->index);
-	dev_info(dcp->dev, "USB4: DPTX clock phy_set_mode %d\n", ret);
-	if (route->usb4_xbar) {
-		mux_control_deselect(route->usb4_xbar);
-		ret = mux_control_select(route->usb4_xbar, route->mux_index);
-		dev_info(dcp->dev, "USB4: reselect dpin after DPTX clock: %d\n",
-			 ret);
-	}
-	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
-		h = dptxport_set_hpd_timeout(dcp->dptxport[0].service, true,
-					     8000);
-		dev_info(dcp->dev, "USB4: set_hpd after DPTX clock: %d\n", h);
-	}
-	return 0;
-}
-
-/*
- * disp-1 is the 16 KB display block. The panel's is running; dcpext1's
- * is not, so the crossbar write clock stays 0. Copy words that are on
- * for the panel and zero on dcpext1. Not /dev/mem.
- */
-#define APPLE_DISP1_SIZE	0x4000
-#define APPLE_DISP1_EDP		0x389320000ULL
-#define APPLE_DISP1_EXT		0x315320000ULL
-
-static int usb4_dispclk_set(const char *val, const struct kernel_param *kp)
-{
-	struct apple_dcp *dcp = usb4_armed_dcp;
-	struct apple_dcp_typec_route *route;
-	void __iomem *edp, *ext;
-	int v, ret, h, copied = 0, logged = 0;
-	u32 off;
-
-	ret = kstrtoint(val, 0, &v);
-	if (ret)
-		return ret;
-	if (v == 0)
-		return 0;
-	if (v != 1)
-		return -EINVAL;
-	if (!dcp)
-		return -ENODEV;
-
-	edp = ioremap(APPLE_DISP1_EDP, APPLE_DISP1_SIZE);
-	ext = ioremap(APPLE_DISP1_EXT, APPLE_DISP1_SIZE);
-	if (!edp || !ext) {
-		dev_err(dcp->dev, "USB4 dispclk: ioremap failed\n");
-		ret = -ENOMEM;
-		goto out_unmap;
-	}
-
-	for (off = 0; off < APPLE_DISP1_SIZE; off += 4) {
-		u32 src = readl(edp + off);
-		u32 dst = readl(ext + off);
-
-		if (!src || dst)
-			continue;
-		writel(src, ext + off);
-		copied++;
-		if (logged < 32) {
-			dev_info(dcp->dev, "USB4 dispclk +%03x %08x\n", off, src);
-			logged++;
-		}
-	}
-	dev_info(dcp->dev, "USB4 dispclk copied %d words edp->dcpext1\n", copied);
-
-	route = dcp->active_typec_route;
-	if (route && route->usb4_xbar) {
-		mux_control_deselect(route->usb4_xbar);
-		ret = mux_control_select(route->usb4_xbar, route->mux_index);
-		dev_info(dcp->dev, "USB4: reselect dpin after dispclk: %d\n", ret);
-	}
-	if (dcp->dptxport[0].enabled && dcp->dptxport[0].service) {
-		h = dptxport_set_hpd_timeout(dcp->dptxport[0].service, true, 8000);
-		dev_info(dcp->dev, "USB4: set_hpd after dispclk: %d\n", h);
-	}
-	ret = 0;
-
-out_unmap:
-	if (ext)
-		iounmap(ext);
-	if (edp)
-		iounmap(edp);
-	return ret;
-}
-
-static int usb4_dispclk;
-static const struct kernel_param_ops usb4_dispclk_ops = {
-	.set = usb4_dispclk_set,
-	.get = param_get_int,
-};
-module_param_cb(usb4_dispclk, &usb4_dispclk_ops, &usb4_dispclk, 0644);
-MODULE_PARM_DESC(usb4_dispclk,
-		 "Write 1 to copy the panel disp-1 clock words onto dcpext1");
-
-static int usb4_dptx;
-static const struct kernel_param_ops usb4_dptx_ops = {
-	.set = usb4_dptx_set,
-	.get = param_get_int,
-};
-module_param_cb(usb4_dptx, &usb4_dptx_ops, &usb4_dptx, 0644);
-MODULE_PARM_DESC(usb4_dptx,
-		 "Write 1 to turn on the USB4 DPTX clocks without switching lanes");
-
-static int usb4_pipe;
-static const struct kernel_param_ops usb4_pipe_ops = {
-	.set = usb4_pipe_set,
-	.get = param_get_int,
-};
-module_param_cb(usb4_pipe, &usb4_pipe_ops, &usb4_pipe, 0644);
-MODULE_PARM_DESC(usb4_pipe,
-		 "Write 1 to power the USB4 dcpext pipe with the panel sequence");
 
 static void dcp_typec_reconnect_work(struct work_struct *work)
 {
@@ -2804,7 +2188,6 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 	if (dcp->index || dcp->dptx_phy || dcp->dptx_die)
 		dev_info(dev, "DCP index:%u dptx target phy: %u dptx die: %u\n",
 			 dcp->index, dcp->dptx_phy, dcp->dptx_die);
-	mutex_init(&dcp->hpd_mutex);
 
 	if (!show_notch)
 		ret = of_property_read_u32(dev->of_node, "apple,notch-height",
@@ -2995,6 +2378,14 @@ static int dcp_platform_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&dcp->typec_fabric_retrain_wq,
 			  dcp_typec_retrain_work);
 	INIT_DELAYED_WORK(&dcp->usb4_hpd_wq, dcp_usb4_hpd_work);
+	/*
+	 * Type-C and Thunderbolt routes can be activated as soon as they are
+	 * registered below (dcp_register_typec_routes()), before the DRM
+	 * device binds and dcp_comp_bind() would otherwise init this. Ported
+	 * from aurora-silicon/linux#8.
+	 */
+	mutex_init(&dcp->hpd_mutex);
+	mutex_init(&dcp->tb_lock);
 
 	platform_set_drvdata(pdev, dcp);
 
@@ -3142,7 +2533,6 @@ static void dcp_platform_shutdown(struct platform_device *pdev)
 		cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
 		cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
 	}
-	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 	component_del(&pdev->dev, &dcp_comp_ops);
 }
 
@@ -3154,7 +2544,6 @@ static int dcp_platform_suspend(struct device *dev)
 	cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 	cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
 	cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
-	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);
@@ -3236,6 +2625,5 @@ void __init dcp_register(void)
 
 void __exit dcp_unregister(void)
 {
-	cancel_delayed_work_sync(&dcp_usb4_auto_arm_wq);
 	platform_driver_unregister(&apple_platform_driver);
 }

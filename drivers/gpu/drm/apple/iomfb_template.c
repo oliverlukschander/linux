@@ -135,7 +135,7 @@ static void right_frame_snapshot(struct apple_dcp *dcp)
 	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2)
 		return;
 	usb4 = dcp_is_usb4_output(dcp);
-	mux = usb4 ? route->usb4_xbar : route->xbar;
+	mux = route->active_xbar ?: route->xbar;
 	if (!mux || dcp->right_frame_snapshot_done[usb4])
 		return;
 	dcp->right_frame_snapshot_done[usb4] = true;
