@@ -1852,8 +1852,25 @@ int apple_usb4_right_dpin0_set_active(bool active)
 		goto unlock_device;
 	}
 	if (!acio->current_cable_info || !acio->nhi_pdev ||
-	    acio->rc_res->start != 0xf01ac0000ULL)
-		goto unlock_cio;
+	    acio->rc_res->start != 0xf01ac0000ULL) {
+		/*
+		 * A real physical unplug clears current_cable_info (and often
+		 * nhi_pdev) before the DCP-issued DEACTIVATE APCALL reaches
+		 * us, so this trips on every ordinary disconnect, not just a
+		 * stale or unrelated call -- confirmed by seeing exactly this
+		 * -ENODEV on a real deactivate during the 0112 sweep, which
+		 * silently skipped both the MODE_A/MODE_B register clear and
+		 * the dpin_attempted reset below, permanently latching out
+		 * every activate for the rest of that boot. DPIN0's registers
+		 * are on-die SoC hardware, not torn down by cable removal, so
+		 * if we previously activated (dpin_base already mapped), fall
+		 * through to the same deactivate/cleanup path as normal
+		 * instead of leaving our own state stuck. Only bail out here
+		 * when there is truly nothing of ours to clean up.
+		 */
+		if (active || !acio->dpin_base)
+			goto unlock_cio;
+	}
 	if (active == acio->dpin_active) {
 		ret = 0;
 		goto unlock_cio;
