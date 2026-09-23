@@ -124,6 +124,19 @@ static bool dpin_native;
 module_param(dpin_native, bool, 0444);
 MODULE_PARM_DESC(dpin_native, "Opt-in J416s right-port native DP-IN handshake");
 
+/*
+ * Bounded lab sweep of the unconfirmed DPIN0 MODE_A/MODE_B value (see
+ * apple-dpin-handshake.h); writable so the remaining candidates in the
+ * formula's one free parameter (0110=9, 0111=8, ... up to
+ * APPLE_DPIN_MODE_VALUE_MAX) can be tried across unplug/replug on one
+ * boot instead of a reinstall+reboot per value. Out-of-range values are
+ * rejected inside apple_dpin_handshake(), not clamped here.
+ */
+static unsigned int dpin_mode_value = 8;
+module_param(dpin_mode_value, uint, 0644);
+MODULE_PARM_DESC(dpin_mode_value,
+		 "DPIN0 MODE_A/MODE_B lab value (0-" __stringify(APPLE_DPIN_MODE_VALUE_MAX) "); read at each activate");
+
 struct apple_cio {
 	struct device *dev;
 	struct device_node *np;
@@ -1861,11 +1874,23 @@ int apple_usb4_right_dpin0_set_active(bool active)
 	}
 	poll.base = acio->dpin_base;
 	poll.deadline = jiffies + msecs_to_jiffies(1000);
-	dev_info(acio->dev, "native DPIN0: active=%u base=%pa, CONTROL=0x0c ACK=0x10\n",
-		 active, &res.start);
-	ret = apple_dpin_handshake(&io, active);
-	if (!ret)
+	dev_info(acio->dev,
+		 "native DPIN0: active=%u base=%pa, CONTROL=0x0c ACK=0x10 mode_value=%u\n",
+		 active, &res.start, dpin_mode_value);
+	ret = apple_dpin_handshake(&io, active, dpin_mode_value);
+	if (!ret) {
 		acio->dpin_active = active;
+		/*
+		 * A clean deactivate clears MODE_A/MODE_B back to a known
+		 * baseline (apple_dpin_handshake()'s !active branch), so a
+		 * later activate this same boot -- possibly with a different
+		 * dpin_mode_value -- is a valid isolated retest. Without this,
+		 * -EALREADY below would permanently latch after the first
+		 * attempt for the rest of the boot.
+		 */
+		if (!active)
+			acio->dpin_attempted = false;
+	}
 	dev_info(acio->dev, "native DPIN0: active=%u handshake=%d\n", active, ret);
 unlock_cio:
 	mutex_unlock(&acio->lock);

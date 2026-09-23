@@ -33,29 +33,36 @@
  * verbatim from this connection's negotiation and is not itself built
  * anywhere in the traced kernel/kext code -- its origin could not be
  * pinned down statically (most likely the separate DCP coprocessor
- * firmware; see notes/2026-09-22-0110-mode-value-guess.md). MODE_VALUE
- * below is therefore an informed, explicitly-labeled estimate, not a
- * confirmed constant:
+ * firmware; see notes/2026-09-22-0110-mode-value-guess.md). The value
+ * used is therefore an informed, explicitly-labeled estimate, not a
+ * confirmed constant, and is passed in by the caller (mode_value below)
+ * rather than fixed at compile time, so the bounded formula's one free
+ * parameter can be swept across a live connection without reinstalling
+ * or rebooting between values -- see 2026-09-23-0112-runtime-sweep.md:
  *   - bits 4-7 of the field select a rate class using the same RBR=0/
  *     HBR=1/HBR2=2/HBR3=3 ordinal already used elsewhere in this driver
  *     (drivers/thunderbolt/tb_regs.h DP_COMMON_CAP_RATE_*); this link
- *     negotiates HBR2, so 2 -- high confidence, unchanged across this
- *     bounded sweep.
+ *     negotiates HBR2, so 2 -- high confidence, unchanged across the
+ *     whole sweep.
  *   - a secondary bit, native-gated on lane_count>=2 (true here: 4) and
  *     on the same "which DPIN0 sub-instance" selector already confirmed
  *     unconditional-0 for this single, non-split port, is set from a
  *     nearby field that other native code also treats as a small,
  *     3-valid-value enumeration (0, 1, or 2) -- this is the weak half of
- *     the formula and the only free parameter varied across candidates
- *     0110 (secondary_bit=1, MODE_VALUE=9, ran cleanly, no picture --
- *     see notes/2026-09-22-0110-result.md), 0111 (secondary_bit=0,
- *     this candidate), and 0112 (secondary_bit=2, if 0111 is also
- *     inconclusive).
- * MODE_VALUE = rate_class(2) * lane_count(4) + secondary_bit(0) = 8.
+ *     the formula and the only free parameter, swept across
+ *     mode_value = rate_class(2) * lane_count(4) + secondary_bit = 8, 9
+ *     (already tested via separate reboots, 0110/0111, both clean with
+ *     no picture), 10.
+ *
+ * mode_value is bounded to APPLE_DPIN_MODE_VALUE_MAX: this caps both the
+ * single bit MODE_A can set (1 << mode_value) and the field width MODE_B
+ * ORs in, which is also exactly the range the deactivate path below
+ * knows how to clear back to a clean baseline. Raising this bound is a
+ * new, reviewable change, not a runtime knob.
  */
 #define APPLE_DPIN_MODE_A 0x14
 #define APPLE_DPIN_MODE_B 0x1c
-#define APPLE_DPIN_MODE_VALUE 8U
+#define APPLE_DPIN_MODE_VALUE_MAX 15U
 
 /* Caller owns powered register access and provides a bounded wait. */
 struct apple_dpin_io {
@@ -66,10 +73,13 @@ struct apple_dpin_io {
 };
 
 static inline int apple_dpin_handshake(const struct apple_dpin_io *io,
-				      int active)
+				      int active, unsigned int mode_value)
 {
 	unsigned int hpd, saved, value, ack;
 	int ret;
+
+	if (active && mode_value > APPLE_DPIN_MODE_VALUE_MAX)
+		return -EINVAL;
 
 	if (active) {
 		hpd = io->read(io->ctx, APPLE_DPIN_HPD);
@@ -89,13 +99,35 @@ static inline int apple_dpin_handshake(const struct apple_dpin_io *io,
 		mode_b = io->read(io->ctx, APPLE_DPIN_MODE_B);
 		if (mode_b != ~0U)
 			io->write(io->ctx, APPLE_DPIN_MODE_B,
-				  mode_b | (APPLE_DPIN_MODE_VALUE << 7));
+				  mode_b | (mode_value << 7));
 
 		mode_a = io->read(io->ctx, APPLE_DPIN_MODE_A);
 		if (mode_a != ~0U)
 			io->write(io->ctx, APPLE_DPIN_MODE_A,
 				  (mode_a & ~0xffU) |
-				  (1U << APPLE_DPIN_MODE_VALUE));
+				  (1U << mode_value));
+	} else {
+		unsigned int mode_a, mode_b;
+
+		/*
+		 * Not native teardown behavior (never traced; see the
+		 * CONNECTED comment above) -- this exists solely so a later
+		 * activate on this same boot starts from clean state and is
+		 * a valid isolated test of a different mode_value. Bounded
+		 * to exactly the bits any in-range mode_value write above
+		 * could have set: MODE_B's OR'd field (bits 7..7+MAX's
+		 * width) and MODE_A's cleared-low-byte-plus-one-set-bit
+		 * (bits 0..MAX). Never touches bits outside that range.
+		 */
+		mode_b = io->read(io->ctx, APPLE_DPIN_MODE_B);
+		if (mode_b != ~0U)
+			io->write(io->ctx, APPLE_DPIN_MODE_B,
+				  mode_b & ~(APPLE_DPIN_MODE_VALUE_MAX << 7));
+
+		mode_a = io->read(io->ctx, APPLE_DPIN_MODE_A);
+		if (mode_a != ~0U)
+			io->write(io->ctx, APPLE_DPIN_MODE_A,
+				  mode_a & ~((1U << (APPLE_DPIN_MODE_VALUE_MAX + 1)) - 1));
 	}
 	value = active ? (saved & ~APPLE_DPIN_INACTIVE) | APPLE_DPIN_CONNECTED :
 			 saved | APPLE_DPIN_INACTIVE;
