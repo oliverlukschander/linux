@@ -693,25 +693,27 @@ dptxport_call_activate(struct apple_epic_service *service,
 
 	/* The native USB4 candidate must never configure a physical DP PHY. */
 	if (usb4_native_dpin && dcp_is_usb4_output(dcp)) {
-		ret = dptxport_native_dpin(service, true, false);
 		/*
-		 * Real macOS resends request_display (AFK/EPIC method 6,
-		 * same one dcp_dptx_connect() already calls once) from
-		 * inside AppleDCPDPTXRemotePortProxy::setPowerState's gated
-		 * handler, specifically once the IOKit power domain confirms
-		 * active -- not just once, unconditionally, at connect time.
-		 * The native DPIN0/crossbar handshake succeeding here is our
-		 * closest equivalent signal that the "power domain" for this
-		 * tunneled target is actually up, so mirror that resend here.
-		 * See notes/2026-09-23-xnu-power-state-trace.md.
+		 * 0114 called dptxport_request_display() (a blocking
+		 * afk_service_call()) from right here -- but this function
+		 * runs as service->ops->call(), dispatched inline on
+		 * afkep->wq, which is an *ordered* workqueue (afk.c). That
+		 * queue is also what runs the work item that completes any
+		 * outbound afk_service_call(), including this one and the
+		 * pre-existing outer request_display() call in
+		 * dcp_dptx_connect() that's still pending when DCP sends us
+		 * this very ACTIVATE APCALL. A call issued from here can
+		 * never observe its own completion (nothing else can run on
+		 * this queue until this handler returns), so it always times
+		 * out after exactly one second -- and it delays the ACTIVATE
+		 * reply DCP is waiting on by that same second, which starves
+		 * the outer call's own independent timeout too. See
+		 * notes/2026-09-23-0114-deadlock-found.md. Do only the
+		 * hardware activation here and return immediately, so the
+		 * outer request_display() call gets an uncontended chance to
+		 * receive DCP's real reply.
 		 */
-		if (!ret) {
-			int r = dptxport_request_display(service);
-
-			dev_info(dcp->dev,
-				 "USB4: resend request_display after native DPIN0 activate: %d\n",
-				 r);
-		}
+		ret = dptxport_native_dpin(service, true, false);
 	} else if (dptx->atcphy &&
 	    (!dcp->phy_managed_by_typec || dcp_is_usb4_output(dcp)))
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
