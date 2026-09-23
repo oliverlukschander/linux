@@ -1594,12 +1594,22 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 			 * route->phy is the per-port ATC PHY (the same one
 			 * usb4_dptx_set() already uses safely, distinct from
 			 * the shared lpdptxphy that also drives eDP).
+			 *
+			 * Do NOT switch this PHY to PHY_MODE_DP: this is a
+			 * genuine USB4 tunnel, and both the reference PR
+			 * (aurora-silicon/linux#8) and our own tunnel-clock
+			 * code (apple_atc_right_usb4_tunnel_rate(), gated on
+			 * atcphy->mode == APPLE_ATCPHY_MODE_USB4) require the
+			 * PHY to stay in USB4/TBT mode for the whole
+			 * connection -- switching it to DP mode reconfigures
+			 * the SERDES lanes for direct DisplayPort signaling,
+			 * which is not what a tunneled AUX/DPRX path needs.
+			 * Every candidate through 0125 has set this
+			 * unconditionally at connect time, before DCP ever
+			 * gets to ACTIVATE/SET_LINK_RATE.
 			 */
-			if (have_phy) {
+			if (have_phy)
 				dcp->dptxport[bind].atcphy = dp_route->phy;
-				phy_set_mode_ext(dp_route->phy, PHY_MODE_DP,
-						 dcp->index);
-			}
 			mutex_lock(&dcp->hpd_mutex);
 			for (i = 0; i < n; i++) {
 				u8 core = cores[i];
