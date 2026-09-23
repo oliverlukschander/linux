@@ -32,23 +32,30 @@
  * (rate class and an unidentified secondary field) that is copied
  * verbatim from this connection's negotiation and is not itself built
  * anywhere in the traced kernel/kext code -- its origin could not be
- * pinned down statically. MODE_VALUE below is therefore an informed,
- * explicitly-labeled estimate, not a confirmed constant:
+ * pinned down statically (most likely the separate DCP coprocessor
+ * firmware; see notes/2026-09-22-0110-mode-value-guess.md). MODE_VALUE
+ * below is therefore an informed, explicitly-labeled estimate, not a
+ * confirmed constant:
  *   - bits 4-7 of the field select a rate class using the same RBR=0/
  *     HBR=1/HBR2=2/HBR3=3 ordinal already used elsewhere in this driver
  *     (drivers/thunderbolt/tb_regs.h DP_COMMON_CAP_RATE_*); this link
- *     negotiates HBR2, so 2.
+ *     negotiates HBR2, so 2 -- high confidence, unchanged across this
+ *     bounded sweep.
  *   - a secondary bit, native-gated on lane_count>=2 (true here: 4) and
  *     on the same "which DPIN0 sub-instance" selector already confirmed
  *     unconditional-0 for this single, non-split port, is set from a
- *     nearby field that other native code also treats as a small
- *     enumeration; the closest available reading of it for a 4-lane
- *     link resolves to that bit being set (1).
- * MODE_VALUE = rate_class(2) * lane_count(4) + secondary_bit(1) = 9.
+ *     nearby field that other native code also treats as a small,
+ *     3-valid-value enumeration (0, 1, or 2) -- this is the weak half of
+ *     the formula and the only free parameter varied across candidates
+ *     0110 (secondary_bit=1, MODE_VALUE=9, ran cleanly, no picture --
+ *     see notes/2026-09-22-0110-result.md), 0111 (secondary_bit=0,
+ *     this candidate), and 0112 (secondary_bit=2, if 0111 is also
+ *     inconclusive).
+ * MODE_VALUE = rate_class(2) * lane_count(4) + secondary_bit(0) = 8.
  */
 #define APPLE_DPIN_MODE_A 0x14
 #define APPLE_DPIN_MODE_B 0x1c
-#define APPLE_DPIN_MODE_VALUE 9U
+#define APPLE_DPIN_MODE_VALUE 8U
 
 /* Caller owns powered register access and provides a bounded wait. */
 struct apple_dpin_io {
