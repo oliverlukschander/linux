@@ -1898,14 +1898,10 @@ static int atcphy_power_on(struct apple_atcphy *atcphy)
 }
 
 /*
- * Bounded J416s right DPIN0 clock experiment. Native 13.5 uses a fixed
- * AUSPLL descriptor and selects the requested rate at TX_DP_CTRL0.
- * All addresses below belong to the existing ATC core mapping, not ACIO RC.
+ * J416s DP tunnel clock. Native 13.5 uses a fixed AUSPLL descriptor and
+ * selects the requested rate at TX_DP_CTRL0. All addresses below belong
+ * to the existing ATC core mapping, not ACIO RC.
  */
-static bool usb4_tunnel_clock;
-module_param(usb4_tunnel_clock, bool, 0444);
-MODULE_PARM_DESC(usb4_tunnel_clock, "Opt-in J416s right DPIN0 tunnel clock");
-
 struct atc_tunnel_saved_reg {
 	u32 reg;
 	u32 mask;
@@ -2367,7 +2363,7 @@ int apple_atc_dp_tunnel_rate(struct phy *phy, u8 rate)
 	struct apple_atcphy *atcphy;
 	int ret;
 
-	if (!usb4_tunnel_clock || !phy || phy->ops != &apple_atc_dp_phy_ops ||
+	if (!phy || phy->ops != &apple_atc_dp_phy_ops ||
 	    !of_machine_is_compatible("apple,j416s"))
 		return -EOPNOTSUPP;
 	atcphy = phy_get_drvdata(phy);

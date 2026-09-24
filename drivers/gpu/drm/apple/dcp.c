@@ -64,40 +64,6 @@ static bool show_notch;
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 
-/* Opt-in, one attempt per module lifetime; never a live parameter write. */
-static bool usb4_protocol_probe;
-module_param(usb4_protocol_probe, bool, 0444);
-MODULE_PARM_DESC(usb4_protocol_probe,
-		 "One USB4 protocol probe without a PHY (native: right port)");
-bool usb4_native_dpin;
-module_param(usb4_native_dpin, bool, 0444);
-MODULE_PARM_DESC(usb4_native_dpin,
-		 "Opt-in native DP-IN ACTIVATE handshake; requires usb4_protocol_probe");
-
-/*
- * Diagnostic (candidate 0135, see notes/2026-09-24-0135-*.md): success
- * (0127) and every dcpext1 failure since (0128-0134) differ in BOTH the
- * physical Type-C port AND the DCP pipeline at once, never in isolation --
- * 0127 was left-port+dcpext0, every failure is right-port+dcpext1. Setting
- * this skips the 0128 fixed-output route-scoring penalty for one boot,
- * so whichever port is actually tunneled lands on dcpext0 instead of
- * dcpext1 -- reproducing 0127's own pipeline choice, but now on the port
- * actually under test. Does not produce a working picture either way
- * (dcpext0's plane/CRTC wiring is wrong for a Type-C-tunneled source,
- * confirmed by 0127 itself); the only thing being tested is whether the
- * rich link-training apcall burst and DPRX_DONE=1 that 0127 reached are a
- * property of the port, or of the pipeline. Opt-in, diagnostic only.
- */
-static bool usb4_route_prefer_fixed_diag;
-module_param(usb4_route_prefer_fixed_diag, bool, 0444);
-MODULE_PARM_DESC(usb4_route_prefer_fixed_diag,
-		 "Diagnostic: skip the dcpext1 route-scoring preference, forcing dcpext0 (0127's pipeline) on whichever port tunnels");
-
-bool dcp_usb4_protocol_probe_enabled(void)
-{
-	return usb4_protocol_probe;
-}
-
 bool hdmi_audio;
 module_param(hdmi_audio, bool, 0644);
 MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
@@ -159,21 +125,6 @@ static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *rout
 		return true;
 
 	return false;
-}
-
-/*
- * Every typec_index with its own ACIO/USB4 controller instance
- * (0 and 1 on the left, 2 on the right on j416s) works identically
- * here -- there is nothing right-port-specific about the native DPIN0
- * mechanism itself, only the physical base address differs per port
- * (see apple_usb4_typec_acio_base() in drivers/thunderbolt/apple.c).
- * Originally bounded to typec_index==2 only while this was a
- * single-port proof of concept; generalized once a second port needed
- * testing.
- */
-bool dcp_usb4_native_route(unsigned int typec_index)
-{
-	return usb4_native_dpin && usb4_protocol_probe && typec_index <= 2;
 }
 
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
@@ -609,20 +560,25 @@ int apple_dcp_tb_dp_tunnel(struct device_node *connector_np, unsigned int dpin,
 		score = dcp_typec_route_score(candidate);
 		/*
 		 * j416s-specific, not in the reference (t8103 has a single
-		 * dcpext): prefer a pipeline with no fixed output of its own
-		 * (dcpext1, USB-C only) over one that can also drive a fixed
-		 * HDMI/DP output (dcpext0). dcp_typec_route_available()
-		 * already excludes dcpext0 while its fixed output is
-		 * actually live, but a plain CRTC-index comparison otherwise
-		 * lets dcpext0 win a tunnel route whenever nothing is
-		 * plugged into HDMI -- confirmed on real hardware (2026-09-24
-		 * candidate 0127's first boot: the tunnel routed to
-		 * dcp@289c00000/dcpext0 instead of dcp@315c00000/dcpext1,
-		 * every prior candidate's own working AFK target). Matches
-		 * the same bias the pre-port dcp_typec_route_score_usb4()
-		 * applied for exactly this reason.
+		 * dcpext): prefer a pipeline with a fixed output of its own
+		 * (dcpext0) for a Type-C tunnel route. dcpext1 (Type-C only)
+		 * looks like the natural choice, but extensive hardware
+		 * testing (2026-09-24, candidates 0128-0134) found it never
+		 * completes a real link for a tunnel target: DCP firmware
+		 * accepts request_display but never issues another apcall,
+		 * on every attempt. The driver-issued connect parameters are
+		 * byte-identical between the two pipelines, and nothing in
+		 * this driver's source explains the difference, so this is a
+		 * firmware-internal decision on the dcpext1 coprocessor
+		 * instance, not something fixable here. dcpext0, forced onto
+		 * the same physical port and tunnel (candidate 0135), reached
+		 * a full real AUX/DPCD link (DPRX_DONE=1) on the first
+		 * attempt and, once a stale test-environment misconfiguration
+		 * was cleared (candidates 0136-0142), a working picture --
+		 * so prefer it unconditionally for a tunnel route on this
+		 * hardware.
 		 */
-		if (candidate->dcp->fixed_phy && !usb4_route_prefer_fixed_diag)
+		if (!candidate->dcp->fixed_phy)
 			score += 100;
 		if (score < best_score) {
 			best = candidate;
@@ -1358,21 +1314,6 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
-	/*
-	 * Diagnostic (candidate 0141): the tunnel connector's plane
-	 * atomic_check never fires and every Aquamarine commit fails
-	 * ATOMIC_TEST_ONLY with EINVAL, unchanged before and after removing
-	 * the possible_crtcs exclusion (0140). Log every reach of this
-	 * per-CRTC hook to see whether the generic core even gets this far
-	 * for dcpext0's CRTC during a failed attempt, or rejects the
-	 * transaction earlier (encoder/CRTC pairing) before any driver hook
-	 * for this CRTC runs at all.
-	 */
-	dev_info(dcp->dev,
-		 "dcp_crtc_atomic_check: crtc=%d mode=%dx%d active=%d enable=%d\n",
-		 crtc->base.id, crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
-		 crtc_state->active, crtc_state->enable);
-
 	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
 	if (!needs_modeset && (!dcp->connector || !dcp->connector->connected)) {
 		/*
@@ -1550,10 +1491,6 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 	if (!READ_ONCE(dcp->typec_cable_connected))
 		return;
 	ret = dcp_dptx_connect(dcp, 0);
-	if (dcp_is_usb4_output(dcp) && usb4_protocol_probe) {
-		dev_info(dcp->dev, "USB4 protocol probe finished: %d; no automatic retry\n", ret);
-		return;
-	}
 	if (!ret) {
 		dcp->typec_reconnect_tries = 0;
 		return;

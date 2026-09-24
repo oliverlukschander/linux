@@ -120,47 +120,14 @@ static u32 dcpep_cb_zero(struct apple_dcp *dcp)
 	return 0;
 }
 
-extern int apple_dpxbar_right_frame_snapshot(struct mux_control *mux);
-
-static void right_frame_snapshot(struct apple_dcp *dcp)
-{
-	struct apple_dcp_typec_route *route = dcp->active_typec_route;
-	struct mux_control *mux;
-	int (*snapshot)(struct mux_control *mux);
-	bool usb4;
-	int ret;
-
-	if (!usb4_native_dpin || !dcp_usb4_protocol_probe_enabled() ||
-	    dcp->index != 2 || !route ||
-	    !dcp_usb4_native_route(route->typec_index) || route->mux_index != 2)
-		return;
-	usb4 = dcp_is_usb4_output(dcp);
-	mux = route->active_xbar ?: route->xbar;
-	if (!mux || dcp->right_frame_snapshot_done[usb4])
-		return;
-	dcp->right_frame_snapshot_done[usb4] = true;
-	snapshot = symbol_get(apple_dpxbar_right_frame_snapshot);
-	if (!snapshot) {
-		dev_info(dcp->dev, "Right frame: crossbar snapshot unavailable\n");
-		return;
-	}
-	ret = snapshot(mux);
-	symbol_put(apple_dpxbar_right_frame_snapshot);
-	dev_info(dcp->dev, "Right frame: usb4=%u crossbar snapshot result=%d\n",
-		 usb4, ret);
-}
-
 static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 				   struct DCP_FW_NAME(dc_swap_complete_resp) *resp)
 {
 	ktime_t now = ktime_get();
 	trace_iomfb_swap_complete(dcp, resp->swap_id);
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: complete id=%u\n", resp->swap_id);
 	dcp->last_swap_id = resp->swap_id;
 
 	dcp_drm_crtc_page_flip(dcp, now);
-	right_frame_snapshot(dcp);
 	if (dcp->crc_enabled) {
 		u32 crc32 = 0;
 		drm_crtc_add_crc_entry(&dcp->crtc->base, true, resp->swap_id, &crc32);
@@ -1147,9 +1114,6 @@ static void
 dcpep_cb_swap_complete_intent_gated(struct apple_dcp *dcp,
 				    struct dcp_swap_complete_intent_gated *info)
 {
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: complete intent id=%u %ux%u\n",
-			      info->swap_id, info->width, info->height);
 	trace_iomfb_swap_complete_intent_gated(dcp, info->swap_id,
 		info->width, info->height);
 }
@@ -1158,8 +1122,6 @@ static void
 dcpep_cb_abort_swap_ap_gated(struct apple_dcp *dcp, u32 *swap_id)
 {
 	trace_iomfb_abort_swap_ap_gated(dcp, *swap_id);
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: abort id=%u\n", *swap_id);
 }
 
 static struct dcpep_get_tiling_state_resp
@@ -1241,9 +1203,6 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 {
 	struct DCP_FW_NAME(dcp_swap_submit_resp) *resp = data;
 
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: submit ack ret=%u\n", resp->ret);
-
 	if (resp->ret) {
 		dev_err(dcp->dev, "swap failed! status %u\n", resp->ret);
 		dcp_drm_crtc_vblank(dcp->crtc);
@@ -1271,9 +1230,6 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 
 	DCP_FW_UNION(dcp->swap).swap.swap_id = resp->swap_id;
 
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: start ack; submit id=%u\n",
-			      resp->swap_id);
 	trace_iomfb_swap_submit(dcp, resp->swap_id);
 	dcp_swap_submit(dcp, false, &DCP_FW_UNION(dcp->swap), dcp_swapped, NULL);
 }
@@ -1283,9 +1239,6 @@ static void do_swap(struct apple_dcp *dcp, void *data, void *cookie)
 {
 	struct dcp_swap_start_req start_req = { 0 };
 
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev, "USB4 frame: start request connected=%u\n",
-			      dcp->connector && dcp->connector->connected);
 	if (dcp->connector && dcp->connector->connected)
 		dcp_swap_start(dcp, false, &start_req, dcp_swap_started, NULL);
 	else
@@ -1579,12 +1532,6 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 		req->swap.bl_power = 0x40;
 		dcp->brightness.update = false;
 	}
-
-	if (usb4_native_dpin && dcp_is_usb4_output(dcp))
-		dev_info_once(dcp->dev,
-			      "USB4 frame: flush surface=%u enabled=0x%x ctm=%u\n",
-			      has_surface, req->swap.swap_enabled,
-			      crtc_state->color_mgmt_changed);
 
 	if (crtc_state->color_mgmt_changed) {
 		struct iomfb_set_matrix_req mat = {

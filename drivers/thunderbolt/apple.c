@@ -121,11 +121,6 @@
 #define TB_VSE_CAP_APPLE_CABLE_INFO_LEGACY_ADAPTER BIT(9)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_TBT2_3 BIT(10)
 
-/* J416s lab candidate: never enabled implicitly by a connected hub. */
-static bool dpin_native;
-module_param(dpin_native, bool, 0444);
-MODULE_PARM_DESC(dpin_native, "Opt-in J416s right-port native DP-IN handshake");
-
 /*
  * Bounded lab sweep of the unconfirmed DPIN0 MODE_A/MODE_B value (see
  * apple-dpin-handshake.h); writable so the remaining candidates in the
@@ -153,9 +148,6 @@ struct apple_cio {
 	void __iomem *rc_base;
 	struct resource *rc_res;
 	struct apple_tunable *rc_tunable;
-	void __iomem *dpin_base;
-	bool dpin_attempted;
-	bool dpin_active;
 
 	struct resource *sram_res;
 	void __iomem *sram_base;
@@ -1545,7 +1537,6 @@ static void apple_cio_stop(struct apple_cio *acio)
 		dev_pm_syscore_device(acio->pd_list->pd_devs[i], false);
 	}
 
-	acio->dpin_active = false;
 	acio->current_cable_info = 0;
 }
 
@@ -1932,141 +1923,6 @@ static int apple_dpin_wait(void *ctx)
 }
 
 /*
- * j416s has one ACIO/USB4 controller instance per Type-C port, each at
- * a base address that differs only in the top byte: 0=left/0x7,
- * 1=left/0xb, 2=right/0xf (confirmed against this machine's own device
- * tree: /sys/firmware/devicetree/base/aliases/usb4-<N>-acio). DPIN0's
- * offset within each instance's window is fixed, so the same top byte
- * that selects the ACIO node also selects the matching DPIN0 range.
- * Originally hardcoded to the right port only (0xf...) while this was
- * a single-port proof of concept; generalized once a second port
- * needed testing.
- */
-static u64 apple_usb4_typec_acio_base(unsigned int typec_index)
-{
-	switch (typec_index) {
-	case 0: return 0x701ac0000ULL;
-	case 1: return 0xb01ac0000ULL;
-	case 2: return 0xf01ac0000ULL;
-	default: return 0;
-	}
-}
-
-int apple_usb4_dpin0_set_active(unsigned int typec_index, bool active);
-int apple_usb4_dpin0_set_active(unsigned int typec_index, bool active)
-{
-	u64 acio_base = apple_usb4_typec_acio_base(typec_index);
-	u64 dpin0_base = (acio_base & 0xf00000000ULL) | 0x01e50000ULL;
-	char path[32];
-	struct resource res = {
-		.start = dpin0_base,
-		.end = dpin0_base + 0x3fffULL,
-		.flags = IORESOURCE_MEM | IORESOURCE_MEM_NONPOSTED,
-		.name = "j416s-native-dpin0",
-	};
-	struct apple_dpin_poll poll;
-	struct apple_dpin_io io = {
-		.read = apple_dpin_read,
-		.write = apple_dpin_write,
-		.wait = apple_dpin_wait,
-		.ctx = &poll,
-	};
-	struct platform_device *pdev;
-	struct device_node *np;
-	struct apple_cio *acio;
-	int ret = -ENODEV;
-
-	if (!dpin_native || !of_machine_is_compatible("apple,j416s") || !acio_base)
-		return -EOPNOTSUPP;
-	snprintf(path, sizeof(path), "/soc/cio@%llx", acio_base);
-	np = of_find_node_by_path(path);
-	if (!np)
-		return -ENODEV;
-	pdev = of_find_device_by_node(np);
-	of_node_put(np);
-	if (!pdev)
-		return -ENODEV;
-	/* Fail rather than wait behind unbind or a cable power transition. */
-	if (!device_trylock(&pdev->dev)) {
-		ret = -EBUSY;
-		goto put;
-	}
-	if (pdev->dev.driver != &apple_cio_driver.driver)
-		goto unlock_device;
-	acio = platform_get_drvdata(pdev);
-	if (!acio || !mutex_trylock(&acio->lock)) {
-		ret = -EBUSY;
-		goto unlock_device;
-	}
-	if (!acio->current_cable_info || !acio->nhi_pdev ||
-	    acio->rc_res->start != acio_base) {
-		/*
-		 * A real physical unplug clears current_cable_info (and often
-		 * nhi_pdev) before the DCP-issued DEACTIVATE APCALL reaches
-		 * us, so this trips on every ordinary disconnect, not just a
-		 * stale or unrelated call -- confirmed by seeing exactly this
-		 * -ENODEV on a real deactivate during the 0112 sweep, which
-		 * silently skipped both the MODE_A/MODE_B register clear and
-		 * the dpin_attempted reset below, permanently latching out
-		 * every activate for the rest of that boot. DPIN0's registers
-		 * are on-die SoC hardware, not torn down by cable removal, so
-		 * if we previously activated (dpin_base already mapped), fall
-		 * through to the same deactivate/cleanup path as normal
-		 * instead of leaving our own state stuck. Only bail out here
-		 * when there is truly nothing of ours to clean up.
-		 */
-		if (active || !acio->dpin_base)
-			goto unlock_cio;
-	}
-	if (active == acio->dpin_active) {
-		ret = 0;
-		goto unlock_cio;
-	}
-	if (active && acio->dpin_attempted) {
-		ret = -EALREADY;
-		goto unlock_cio;
-	}
-	if (active)
-		acio->dpin_attempted = true;
-	if (!acio->dpin_base) {
-		acio->dpin_base = devm_ioremap_resource(&pdev->dev, &res);
-		if (IS_ERR(acio->dpin_base)) {
-			ret = PTR_ERR(acio->dpin_base);
-			acio->dpin_base = NULL;
-			goto unlock_cio;
-		}
-	}
-	poll.base = acio->dpin_base;
-	poll.deadline = jiffies + msecs_to_jiffies(1000);
-	dev_info(acio->dev,
-		 "native DPIN0: active=%u base=%pa, CONTROL=0x0c ACK=0x10 mode_value=%u\n",
-		 active, &res.start, dpin_mode_value);
-	ret = apple_dpin_handshake(&io, active, dpin_mode_value);
-	if (!ret) {
-		acio->dpin_active = active;
-		/*
-		 * A clean deactivate clears MODE_A/MODE_B back to a known
-		 * baseline (apple_dpin_handshake()'s !active branch), so a
-		 * later activate this same boot -- possibly with a different
-		 * dpin_mode_value -- is a valid isolated retest. Without this,
-		 * -EALREADY below would permanently latch after the first
-		 * attempt for the rest of the boot.
-		 */
-		if (!active)
-			acio->dpin_attempted = false;
-	}
-	dev_info(acio->dev, "native DPIN0: active=%u handshake=%d\n", active, ret);
-unlock_cio:
-	mutex_unlock(&acio->lock);
-unlock_device:
-	device_unlock(&pdev->dev);
-put:
-	put_device(&pdev->dev);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
-
-/*
  * Thunderbolt DP tunnel routing, ported from aurora-silicon/linux#8: the
  * real trigger this project's own analog-DPIN/dpin_aux mechanisms never had
  * -- a genuine "a DP tunnel came up on dpin N" notification from the
@@ -2086,10 +1942,9 @@ EXPORT_SYMBOL_GPL(apple_usb4_dpin0_set_active);
  * APPLE_CIO_DPIN1_ANALOG above, which is the separate "analog AUX
  * serializer" block confirmed ineffective on this hardware (dpin_aux,
  * 2026-09-21 and again 2026-09-23). This offset and stride are confirmed
- * two ways: apple_usb4_dpin0_set_active() above computes the identical
- * address independently, and it matches this project's own boot logs
- * ("native DPIN0: ... base=0x...701e50000" = rc_res->start (0x701ac0000)
- * + 0x390000 for the left port).
+ * against this project's own boot logs ("native DPIN0: ...
+ * base=0x...701e50000" = rc_res->start (0x701ac0000) + 0x390000 for the
+ * left port).
  */
 #define APPLE_DPIN_HANDSHAKE_OFFSET	0x390000
 #define APPLE_DPIN_STRIDE		0x8000

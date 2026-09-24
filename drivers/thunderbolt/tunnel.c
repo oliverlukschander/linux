@@ -111,11 +111,6 @@ module_param(dp_video_counter, bool, 0444);
 MODULE_PARM_DESC(dp_video_counter,
 		 "diagnostic: count packets on the DP video path's DP IN hop and its downstream (hub-side) hop (Apple j416s right ACIO route only; read via debugfs port counters); default: false");
 
-static bool dp_bw_grant;
-module_param(dp_bw_grant, bool, 0444);
-MODULE_PARM_DESC(dp_bw_grant,
-		 "grant the DP video path's non-reduced bandwidth immediately instead of the spec's initial 0, since this adapter has never been observed to send a bandwidth request notification (Apple j416s right ACIO route only); default: false");
-
 static void tb_dp_dump_apple(struct tb_tunnel *tunnel);
 static int tb_apple_nhi_typec_index(struct tb_nhi *nhi);
 
@@ -967,7 +962,7 @@ static bool tb_dp_is_apple_j416s_right_dpin(const struct tb_port *in)
 
 static bool tb_dp_apple_dpin_needs_bw_grant(const struct tb_port *in)
 {
-	return dp_bw_grant && tb_dp_is_apple_j416s_right_dpin(in);
+	return tb_dp_is_apple_j416s_right_dpin(in);
 }
 
 static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)

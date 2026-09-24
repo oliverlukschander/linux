@@ -99,18 +99,11 @@ struct apple_dpxbar_hw {
 	const struct mux_control_ops *ops;
 };
 
-static bool usb4_defer_bringup;
-module_param(usb4_defer_bringup, bool, 0444);
-MODULE_PARM_DESC(usb4_defer_bringup, "Defer J416s right DPIN0 gates until tunnel clock setup");
-
 struct apple_dpxbar {
 	struct device *dev;
 	void __iomem *regs;
 	int selected_dispext[MUX_MAX];
 	spinlock_t lock;
-	bool frame_snapshot_done[MUX_MAX];
-	bool dpin0_bringup_attempted;
-	bool defer_dpin0_bringup;
 };
 
 static inline void dpxbar_mask32(struct apple_dpxbar *xbar, u32 reg, u32 mask,
@@ -218,7 +211,6 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 	unsigned int dispext_bit_en;
 	u32 atc_bit, mux_mask, mux_val;
 	bool enable;
-	bool deferred = dpxbar->defer_dpin0_bringup && index == MUX_DPIN0;
 	int ret = 0;
 
 	if (index >= MUX_MAX)
@@ -235,9 +227,6 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 	} else {
 		return -EINVAL;
 	}
-
-	if (deferred && enable && state != 2)
-		return -EINVAL;
 
 	atc_bit = t602x_atc_bit(index);
 	mux_mask = t602x_mux_mask(index);
@@ -282,10 +271,8 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 			    T602X_FIFO_RD_PCLK2_EN : FIFO_RD_PCLK1_EN, atc_bit);
 
 		dpxbar_clear32(dpxbar, T602X_REG_034, atc_bit);
-		if (!deferred) {
-			dpxbar_clear32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
-			dpxbar_clear32(dpxbar, CROSSBAR_DISPEXT_EN, prev_dispext_bit);
-		}
+		dpxbar_clear32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
+		dpxbar_clear32(dpxbar, CROSSBAR_DISPEXT_EN, prev_dispext_bit);
 		dpxbar_mask32(dpxbar, T602X_REG_030, mux_mask, 0);
 
 		dpxbar->selected_dispext[index] = -1;
@@ -294,10 +281,6 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 	if (enable) {
 		dpxbar_mask32(dpxbar, T602X_REG_030, mux_mask, mux_val);
 		udelay(10);
-
-		/* Native connect() selects only; DID_CHANGE enables after PLL setup. */
-		if (deferred)
-			goto route_selected;
 
 		dpxbar_clear32(dpxbar, T602X_FIFO_WR_N_CLK_EN, dispext_bit);
 		dpxbar_clear32(dpxbar, T602X_REG_014, 0x4);
@@ -323,7 +306,6 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 
 		dpxbar_set32(dpxbar, T602X_FIFO_RD_UNK_EN, dispext_bit);
 
-route_selected:
 		dpxbar->selected_dispext[index] = state;
 	}
 
@@ -338,35 +320,9 @@ route_selected:
 		dev_info(dpxbar->dev, "Switched %s to disconnected state\n",
 			 apple_dpxbar_names[index]);
 
-	if (deferred && enable)
-		dev_info(dpxbar->dev, "native DPIN0: route selected; gates deferred until clock setup\n");
 	t602x_dump(dpxbar, enable ? apple_dpxbar_names[index] : "idle");
 
 	return ret;
-}
-
-/* Native T602x clock1 bring-up for an already selected right DPIN0/source2. */
-static int t602x_right_dpin0_bring_up(struct apple_dpxbar *xbar)
-{
-	/* Release existing resets; do not take the live connection down first. */
-	dpxbar_clear32(xbar, T602X_FIFO_WR_N_CLK_EN, BIT(2));
-	dpxbar_clear32(xbar, T602X_REG_014, BIT(2));
-	dpxbar_clear32(xbar, T602X_FIFO_RD_PCLK2_EN, BIT(0));
-	udelay(1);
-	if ((readl(xbar->regs + T602X_REG_804_STAT) & BIT(2)) ||
-	    (readl(xbar->regs + T602X_REG_810_STAT) & BIT(2)) ||
-	    (readl(xbar->regs + T602X_REG_81C_STAT) & BIT(0)))
-		return -ETIMEDOUT;
-
-	dpxbar_set32(xbar, T602X_FIFO_WR_UNK_EN, BIT(2));
-	dpxbar_mask32(xbar, T602X_REG_018, GENMASK(5, 4), BIT(4));
-	dpxbar_mask32(xbar, T602X_FIFO_RD_N_CLK_EN, GENMASK(1, 0), BIT(0));
-	dpxbar_set32(xbar, T602X_FIFO_WR_DPTX_CLK_EN, BIT(2));
-	dpxbar_set32(xbar, T602X_REG_00C, BIT(2));
-	dpxbar_set32(xbar, T602X_REG_01C, BIT(0));
-	dpxbar_set32(xbar, T602X_REG_034, BIT(0));
-	dpxbar_set32(xbar, T602X_FIFO_RD_UNK_EN, BIT(2));
-	return 0;
 }
 
 static int apple_dpxbar_set(struct mux_control *mux, int state)
@@ -508,97 +464,12 @@ static const struct mux_control_ops apple_dpxbar_t602x_ops = {
 };
 
 /*
- * j416s has one display crossbar instance per Type-C port at
- * 0x70304c000 (left), 0xb0304c000 (left), 0xf0304c000 (right) --
- * the same top-byte pattern as the ACIO/DPIN0 addresses in
- * drivers/thunderbolt/apple.c. Originally these three call sites only
- * accepted the right port's address while this was a single-port
- * proof of concept; generalized once a second port needed testing.
- */
-static bool apple_dpxbar_is_typec_crossbar(u64 base)
-{
-	return base == 0x70304c000ULL || base == 0xb0304c000ULL ||
-	       base == 0xf0304c000ULL;
-}
-
-/* Optional diagnostic, called only by the native DPIN0 experiment. */
-int apple_dpxbar_right_frame_snapshot(struct mux_control *mux);
-int apple_dpxbar_right_frame_snapshot(struct mux_control *mux)
-{
-	struct apple_dpxbar *xbar;
-	struct resource *res;
-	unsigned long flags;
-	unsigned int index;
-	int ret = 0;
-
-	if (!mux || mux->chip->ops != &apple_dpxbar_t602x_ops ||
-	    !of_machine_is_compatible("apple,j416s"))
-		return -EINVAL;
-	index = mux_control_get_index(mux);
-	if (index != MUX_DPIN0 && index != MUX_DPPHY)
-		return -EINVAL;
-	xbar = mux_chip_priv(mux->chip);
-	res = platform_get_resource(to_platform_device(xbar->dev), IORESOURCE_MEM, 0);
-	if (!res || !apple_dpxbar_is_typec_crossbar(res->start) || resource_size(res) < 0x1000)
-		return -EINVAL;
-
-	/* Selection and disconnect use this same lock. No new mapping/writes. */
-	spin_lock_irqsave(&xbar->lock, flags);
-	if (xbar->selected_dispext[index] != 2)
-		ret = -ENODEV;
-	else if (xbar->frame_snapshot_done[index])
-		ret = -EALREADY;
-	else {
-		xbar->frame_snapshot_done[index] = true;
-		t602x_dump(xbar, index == MUX_DPIN0 ?
-			   "after-frame-dpin0" : "after-frame-dpphy");
-	}
-	spin_unlock_irqrestore(&xbar->lock, flags);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(apple_dpxbar_right_frame_snapshot);
-
-/* Optional, one-shot native bring-up after successful USB4 clock setup. */
-int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux);
-int apple_dpxbar_right_dpin0_bring_up(struct mux_control *mux)
-{
-	struct apple_dpxbar *xbar;
-	struct resource *res;
-	unsigned long flags;
-	int ret;
-
-	if (!mux || mux->chip->ops != &apple_dpxbar_t602x_ops ||
-	    mux_control_get_index(mux) != MUX_DPIN0 ||
-	    !of_machine_is_compatible("apple,j416s"))
-		return -EINVAL;
-	xbar = mux_chip_priv(mux->chip);
-	res = platform_get_resource(to_platform_device(xbar->dev), IORESOURCE_MEM, 0);
-	if (!res || !apple_dpxbar_is_typec_crossbar(res->start) || resource_size(res) < 0x1000)
-		return -EINVAL;
-	spin_lock_irqsave(&xbar->lock, flags);
-	if (xbar->selected_dispext[MUX_DPIN0] != 2)
-		ret = -ENODEV;
-	else if (xbar->dpin0_bringup_attempted)
-		ret = -EALREADY;
-	else {
-		xbar->dpin0_bringup_attempted = true;
-		ret = t602x_right_dpin0_bring_up(xbar);
-		t602x_dump(xbar, "native-link-up-dpin0");
-	}
-	spin_unlock_irqrestore(&xbar->lock, flags);
-	dev_info(xbar->dev, "native DPIN0 crossbar bring-up result=%d\n", ret);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(apple_dpxbar_right_dpin0_bring_up);
-
-/*
- * Generalization of t602x_right_dpin0_bring_up() (kept above, unchanged, for
- * the existing native-DPIN0 experiment) to any index and any already-
- * selected dispext, for aurora-silicon/linux#8's dcp_tunnel_crossbar_up():
- * bring the clock/FIFO gates up on a mux that dcp_typec_route_activate()
- * already selected (deferred mode, no gates yet). Same register set,
- * parameterized on the live selected_dispext[index] instead of a hardcoded
- * source 2, and this index's own atc_bit instead of always dpin0's.
+ * For aurora-silicon/linux#8's dcp_tunnel_crossbar_up(): bring the
+ * clock/FIFO gates up on a mux that dcp_typec_route_activate() already
+ * selected. Same register set as apple_dpxbar_set_t602x()'s enable path,
+ * parameterized on the live selected_dispext[index] instead of a
+ * hardcoded source 2, and this index's own atc_bit instead of always
+ * dpin0's.
  */
 int apple_dpxbar_link_up(struct mux_control *mux);
 int apple_dpxbar_link_up(struct mux_control *mux)
@@ -661,9 +532,8 @@ EXPORT_SYMBOL_GPL(apple_dpxbar_link_up);
  * deselecting the mux or dropping CROSSBAR_ATC_EN/CROSSBAR_DISPEXT_EN --
  * ported from aurora-silicon/linux#8's own apple_dpxbar_link_down()
  * semantics ("mux selection and ATC output enable kept"). Re-asserts the
- * same reset bits apple_dpxbar_link_up()/t602x_right_dpin0_bring_up()
- * release, so a later link_up() on the same route starts from the same
- * state as a fresh selection.
+ * same reset bits apple_dpxbar_link_up() releases, so a later link_up()
+ * on the same route starts from the same state as a fresh selection.
  */
 int apple_dpxbar_link_down(struct mux_control *mux);
 int apple_dpxbar_link_down(struct mux_control *mux)
@@ -706,7 +576,6 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 	struct mux_chip *mux_chip;
 	struct apple_dpxbar *dpxbar;
 	const struct apple_dpxbar_hw *hw;
-	struct resource *res;
 	int ret;
 
 	hw = of_device_get_match_data(dev);
@@ -718,11 +587,6 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 	mux_chip->ops = hw->ops;
 	spin_lock_init(&dpxbar->lock);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dpxbar->defer_dpin0_bringup = usb4_defer_bringup && res &&
-		apple_dpxbar_is_typec_crossbar(res->start) && resource_size(res) >= 0x1000 &&
-		of_machine_is_compatible("apple,j416s") &&
-		of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar");
 	dpxbar->dev = dev;
 	dpxbar->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dpxbar->regs))
