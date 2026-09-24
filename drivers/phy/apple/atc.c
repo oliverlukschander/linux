@@ -1939,7 +1939,8 @@ static int atc_tunnel_command(struct apple_atcphy *atcphy, u32 command)
 
 static void atc_tunnel_restore(struct apple_atcphy *atcphy)
 {
-	int i;
+	u32 value;
+	int i, ret;
 
 	lockdep_assert_held(&atcphy->lock);
 	if (!atcphy->tunnel_saved)
@@ -1950,6 +1951,23 @@ static void atc_tunnel_restore(struct apple_atcphy *atcphy)
 	for (i = ARRAY_SIZE(atc_tunnel_regs) - 1; i >= 0; i--)
 		core_mask32(atcphy, atc_tunnel_regs[i].reg, atc_tunnel_regs[i].mask,
 			    atcphy->tunnel_saved_regs[i] & atc_tunnel_regs[i].mask);
+	/*
+	 * atc_tunnel_start()'s preflight refuses to proceed while
+	 * ACIOPHY_AUSPLL_LOCK is still set, to avoid clobbering a PLL a
+	 * concurrent user actually has locked. Immediately after tearing our
+	 * own lock down, that same bit can still read set for a brief window
+	 * before the lock detector catches up -- and DCP firmware retries a
+	 * failed tunnel clock request roughly once a second, which is faster
+	 * than that window on a hot retrain loop. Wait for it to clear here
+	 * so a request coming in right after this returns sees a genuinely
+	 * idle PLL instead of refusing itself forever.
+	 */
+	ret = readl_poll_timeout(atcphy->regs.core + ACIOPHY_DP_PCLK_STAT, value,
+				 !(value & ACIOPHY_AUSPLL_LOCK), 10, 10000);
+	if (ret)
+		dev_warn(atcphy->dev,
+			 "USB4 tunnel clock: AUSPLL_LOCK did not clear after teardown (stat=%#x)\n",
+			 value);
 	atcphy->tunnel_saved = false;
 	atcphy->tunnel_attempted = false;
 	atcphy->tunnel_rate = 0;
