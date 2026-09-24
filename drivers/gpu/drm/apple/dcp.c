@@ -76,6 +76,25 @@ module_param(usb4_native_dpin, bool, 0444);
 MODULE_PARM_DESC(usb4_native_dpin,
 		 "Opt-in native DP-IN ACTIVATE handshake; requires usb4_protocol_probe");
 
+/*
+ * Diagnostic (candidate 0135, see notes/2026-09-24-0135-*.md): success
+ * (0127) and every dcpext1 failure since (0128-0134) differ in BOTH the
+ * physical Type-C port AND the DCP pipeline at once, never in isolation --
+ * 0127 was left-port+dcpext0, every failure is right-port+dcpext1. Setting
+ * this skips the 0128 fixed-output route-scoring penalty for one boot,
+ * so whichever port is actually tunneled lands on dcpext0 instead of
+ * dcpext1 -- reproducing 0127's own pipeline choice, but now on the port
+ * actually under test. Does not produce a working picture either way
+ * (dcpext0's plane/CRTC wiring is wrong for a Type-C-tunneled source,
+ * confirmed by 0127 itself); the only thing being tested is whether the
+ * rich link-training apcall burst and DPRX_DONE=1 that 0127 reached are a
+ * property of the port, or of the pipeline. Opt-in, diagnostic only.
+ */
+static bool usb4_route_prefer_fixed_diag;
+module_param(usb4_route_prefer_fixed_diag, bool, 0444);
+MODULE_PARM_DESC(usb4_route_prefer_fixed_diag,
+		 "Diagnostic: skip the dcpext1 route-scoring preference, forcing dcpext0 (0127's pipeline) on whichever port tunnels");
+
 bool dcp_usb4_protocol_probe_enabled(void)
 {
 	return usb4_protocol_probe;
@@ -610,7 +629,7 @@ int apple_dcp_tb_dp_tunnel(struct device_node *connector_np, unsigned int dpin,
 		 * the same bias the pre-port dcp_typec_route_score_usb4()
 		 * applied for exactly this reason.
 		 */
-		if (candidate->dcp->fixed_phy)
+		if (candidate->dcp->fixed_phy && !usb4_route_prefer_fixed_diag)
 			score += 100;
 		if (score < best_score) {
 			best = candidate;
