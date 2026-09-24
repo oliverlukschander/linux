@@ -1316,7 +1316,20 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 	}
 
 	ret = tb_dp_port_enable(tunnel->src_port, active);
-	if (ret)
+	/*
+	 * On deactivate, a departing dst_port already marked unplugged
+	 * makes tb_port_read/write short-circuit to -ENODEV with zero I/O
+	 * (tb.h) -- deterministically, not just on hardware timing. Do not
+	 * let that skip ops->dp_tunnel_deactivate() below: this tunnel.c is
+	 * generic core code, but ops->dp_tunnel_deactivate is what apple.c
+	 * relies on to clear its own apple_dpin_ctx latch (candidate 0138,
+	 * see notes/2026-09-24-0138-*.md) -- without it, a physical
+	 * unplug/replug can never re-arm a fresh connect. The caller
+	 * (tb_tunnel_deactivate()) already discards this function's return
+	 * value on the deactivate path, so relaxing it here changes nothing
+	 * any caller observes; the activate (active=true) path is untouched.
+	 */
+	if (ret && active)
 		return ret;
 
 	if (tb_port_is_dpout(tunnel->dst_port)) {
@@ -1347,7 +1360,7 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			if (tb_port_write(out, &v, TB_CFG_PORT, out->cap_adap + ADP_DP_CS_3, 1))
 				tb_port_warn(out, "Apple: cannot restore DP link training\n");
 		}
-		if (ret)
+		if (ret && active)
 			return ret;
 	}
 
