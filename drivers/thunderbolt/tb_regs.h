@@ -428,6 +428,12 @@ struct tb_regs_port_header {
 #define ADP_DP_CS_2_ESTIMATED_BW_SHIFT		24
 #define ADP_DP_CS_3				0x03
 #define ADP_DP_CS_3_HPDC			BIT(9)
+/*
+ * Apple silicon host DP IN adapter: pulsing this tells the adapter to
+ * propagate HPD to ADP_DP_CS_2_HPD. Ported from aurora-silicon/linux#8
+ * (t8103, hardware-tested); candidate 0131, see notes/2026-09-24-0131-*.md.
+ */
+#define ADP_DP_CS_3_HPD_PROPAGATE		BIT(10)
 #define DP_LOCAL_CAP				0x04
 #define DP_REMOTE_CAP				0x05
 /* For DP IN adapter */

@@ -1226,6 +1226,55 @@ static void tb_dp_dprx_stop(struct tb_tunnel *tunnel)
 	}
 }
 
+/*
+ * Apple silicon host DP IN adapter: this adapter has no real physical DP
+ * connector wired to it, so nothing ever sets its own ADP_DP_CS_2_HPD --
+ * pulse ADP_DP_CS_3_HPD_PROPAGATE to tell it to propagate HPD itself, and
+ * wait for it to take, same as aurora-silicon/linux#8's hardware-tested
+ * t8103 implementation (three docks, multiple monitors). Diagnostic
+ * candidate 0131: on this project's own hardware, the CS0-CS13 registers
+ * this pulse should move have been observed completely static across
+ * every dcpext1/right-port failure so far (0128-0130), unlike the one
+ * success (0127, dcpext0/left-port) -- see notes/2026-09-24-0131-*.md.
+ * Logs and continues either way; a failed pulse is not treated as a fatal
+ * tunnel-activation error, matching the reference.
+ */
+static void tb_dp_apple_pulse_hpd(struct tb_port *in)
+{
+	int i, hpd = 0;
+	u32 v;
+
+	if (!in->cap_adap)
+		return;
+	if (tb_port_read(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1)) {
+		tb_port_warn(in, "Apple: cannot read DP adapter state, HPD not pulsed\n");
+		return;
+	}
+	/* HPDC may still be set from a previous tunnel's teardown */
+	v &= ~ADP_DP_CS_3_HPDC;
+	v |= ADP_DP_CS_3_HPD_PROPAGATE;
+	if (tb_port_write(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1)) {
+		tb_port_warn(in, "Apple: cannot pulse HPD propagation\n");
+		return;
+	}
+	usleep_range(10000, 11000);
+	v &= ~ADP_DP_CS_3_HPD_PROPAGATE;
+	if (tb_port_write(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1))
+		tb_port_warn(in, "Apple: cannot end HPD propagation pulse\n");
+	for (i = 0; i < 200; i++) {
+		hpd = tb_dp_port_hpd_is_active(in);
+		if (hpd)
+			break;
+		usleep_range(10000, 11000);
+	}
+	if (hpd < 0)
+		tb_port_warn(in, "Apple: cannot read HPD status: %d\n", hpd);
+	else if (!hpd)
+		tb_port_warn(in, "Apple: HPD did not propagate\n");
+	else
+		tb_port_info(in, "Apple: HPD propagated\n");
+}
+
 static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 {
 	int ret;
@@ -1276,8 +1325,11 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			return ret;
 	}
 
-	if (active && tb_nhi_is_apple(tunnel->tb->nhi))
+	if (active && tb_nhi_is_apple(tunnel->tb->nhi)) {
+		if (tb_port_is_dpin(tunnel->src_port))
+			tb_dp_apple_pulse_hpd(tunnel->src_port);
 		tb_dp_dump_apple(tunnel);
+	}
 
 	if (active) {
 		const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
