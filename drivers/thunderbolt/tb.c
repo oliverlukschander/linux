@@ -1954,22 +1954,10 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		 * happens either because there is no graphics driver
 		 * loaded or not all DP cables where connected to the
 		 * discrete router.
-		 *
-		 * On Apple Silicon, DPTX talks AUX through the DP IN
-		 * adapter after the tunnel paths exist. Tearing the
-		 * tunnel down on DPRX timeout makes that impossible.
-		 * Keep the tunnel; DPTX can still fail independently.
 		 */
-		if (tb->nhi && tb->nhi->dev && tb->nhi->dev->of_node &&
-		    of_device_is_compatible(tb->nhi->dev->of_node,
-					    "apple,t8103-usb4-nhi")) {
-			tb_tunnel_warn(tunnel,
-				       "Apple: DPRX not done, keeping DP tunnel\n");
-		} else {
-			tb_tunnel_warn(tunnel, "not active, tearing down\n");
-			tb_dp_resource_unavailable(tb, in,
-						   "DPRX negotiation failed");
-		}
+		tb_tunnel_warn(tunnel, "not active, tearing down\n");
+		tb_dp_resource_unavailable(tb, in,
+					   "DPRX negotiation failed");
 	}
 	mutex_unlock(&tb->lock);
 

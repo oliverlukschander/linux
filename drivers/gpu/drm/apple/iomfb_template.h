@@ -153,7 +153,6 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			       struct drm_crtc_state *crtc_state);
 void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_state *state);
 void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp);
-void DCP_FW_NAME(iomfb_poweron_pipe)(struct apple_dcp *dcp);
 void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp);
 void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp);
 void DCP_FW_NAME(iomfb_start)(struct apple_dcp *dcp);

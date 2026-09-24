@@ -108,21 +108,20 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	 * on a different SoC (aurora-silicon/linux#8) adds this exact role
 	 * bit for its tunnel routes; our own analog-DPIN path has never set
 	 * it, always sending a plain direct-PHY attributes value even
-	 * though this is a genuinely USB4-tunneled connection. If DCP
-	 * firmware treats a failed AUX probe as fatal for role=0 but
-	 * expects to keep training regardless for role=1 (a Thunderbolt
-	 * tunnel's AUX proxying may not respond as fast as a direct PHY's),
-	 * that alone would explain every one of tonight's runs -- 0119,
-	 * 0121 and 0122 all reached the identical INACTIVE_SINK_DETECTED/
-	 * DPRX-timeout outcome despite substantially different Activate/
-	 * crossbar ordering, which points at a signal we are not sending
-	 * at all rather than a timing issue we can fix by reordering.
+	 * though this is a genuinely USB4-tunneled connection. DCP firmware
+	 * appears to treat a failed AUX probe as fatal for role=0 but keeps
+	 * training regardless for role=1 (a Thunderbolt tunnel's AUX
+	 * proxying may not respond as fast as a direct PHY's): repeated
+	 * test runs with substantially different Activate/crossbar ordering
+	 * all reached the identical INACTIVE_SINK_DETECTED/DPRX-timeout
+	 * outcome, which points at a signal we are not sending at all
+	 * rather than a timing issue fixable by reordering.
 	 */
 	u32 attrs = 0x100 | (dcp_is_usb4_output(service->ep->dcp) ? 1 : 0);
 
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 	dptx->validate_calls++;
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX validate: call #%u this boot target=0x%x core=%u atc=%u die=%u attrs=0x%x caller=%pS\n",
 		 dptx->validate_calls, target, core, atc, die,
 		 attrs, __builtin_return_address(0));
@@ -169,7 +168,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 
 	trace_dptxport_connect(dptx, core, atc, die);
 	dptx->connect_calls++;
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX connect: call #%u this boot target=0x%x unk=0x%x caller=%pS\n",
 		 dptx->connect_calls, target, unk_field,
 		 __builtin_return_address(0));
@@ -200,11 +199,11 @@ int dptxport_request_display(struct apple_epic_service *service)
 	int ret;
 
 	dptx->request_calls++;
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX request_display: call #%u this boot caller=%pS\n",
 		 dptx->request_calls, __builtin_return_address(0));
 	ret = afk_service_call(service, 0, 6, NULL, 0, 16, NULL, 0, 16);
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX request_display: call #%u result=%d\n",
 		 dptx->request_calls, ret);
 	return ret;
@@ -216,11 +215,11 @@ int dptxport_release_display(struct apple_epic_service *service)
 	int ret;
 
 	dptx->release_calls++;
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX release_display: call #%u this boot caller=%pS\n",
 		 dptx->release_calls, __builtin_return_address(0));
 	ret = afk_service_call(service, 0, 7, NULL, 0, 16, NULL, 0, 16);
-	dev_info(service->ep->dcp->dev,
+	dev_dbg(service->ep->dcp->dev,
 		 "DPTX release_display: call #%u result=%d\n",
 		 dptx->release_calls, ret);
 	return ret;
@@ -453,13 +452,12 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 		 * and USB4-tunnel paths (also part of 0dc9f50's unification),
 		 * so gating it here meant every tunneled connect timed out
 		 * after a fully successful DPRX/AUX handshake and lane
-		 * negotiation, on every candidate since 0127 -- firmware
-		 * does not send FORCE_HOTPLUG_DETECT (the only other
-		 * completion site) for a tunnel. The reference
-		 * (aurora-silicon/linux#8) completes linkcfg_completion here
-		 * unconditionally; usb4_lane_completion has no consumer
-		 * anywhere in this tree (grep confirms), so drop both the
-		 * dead gate and the dead completion and match the reference.
+		 * negotiation -- firmware does not send FORCE_HOTPLUG_DETECT
+		 * (the only other completion site) for a tunnel. The
+		 * reference (aurora-silicon/linux#8) completes
+		 * linkcfg_completion here unconditionally; usb4_lane_completion
+		 * has no consumer anywhere in this tree, so this drops both the
+		 * dead gate and the dead completion and matches the reference.
 		 */
 		complete(&dptx->linkcfg_completion);
 	}
@@ -694,12 +692,12 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 {
 	struct dptx_port *dptx = service->cookie;
 	trace_dptxport_apcall(dptx, idx, data_size);
-	dev_info(service->ep->dcp->dev, "DPTXPort: APCALL %u (%zu bytes)\n",
+	dev_dbg(service->ep->dcp->dev, "DPTXPort: APCALL %u (%zu bytes)\n",
 		 idx, data_size);
 	if (data_size)
-		print_hex_dump(KERN_INFO, "DPTXPort: apcall data: ",
-			       DUMP_PREFIX_OFFSET, 16, 1, data,
-			       min(data_size, (size_t)64), true);
+		print_hex_dump_debug("DPTXPort: apcall data: ",
+				     DUMP_PREFIX_OFFSET, 16, 1, data,
+				     min(data_size, (size_t)64), true);
 
 	switch (idx) {
 	case DPTX_APCALL_WILL_CHANGE_LINKG_CONFIG:

@@ -1951,6 +1951,7 @@ static void atc_tunnel_restore(struct apple_atcphy *atcphy)
 		core_mask32(atcphy, atc_tunnel_regs[i].reg, atc_tunnel_regs[i].mask,
 			    atcphy->tunnel_saved_regs[i] & atc_tunnel_regs[i].mask);
 	atcphy->tunnel_saved = false;
+	atcphy->tunnel_attempted = false;
 	atcphy->tunnel_rate = 0;
 }
 
@@ -1994,11 +1995,13 @@ static int atc_tunnel_start(struct apple_atcphy *atcphy, u8 rate)
 		 "USB4 tunnel clock preflight: +7000=%08x +2200=%08x +2000=%08x +7044=%08x\n",
 		 gates, outputs, command, status);
 	/*
-	 * 0101 observed 0xe001 before the first rate request: gate bits set,
-	 * byte-clock reset asserted, selectors and reset-release bits clear.
-	 * Native configureDPTunnelMode tracks clients in software, not these
-	 * gates. Accept only this exact additional state, with no enabled
-	 * PLL output, outstanding command or lock. Other gate states refuse.
+	 * Before the first rate request, TX_DP_CTRL0 gate bits read 0xe001:
+	 * the enable gates are set, the byte-clock reset is asserted, and the
+	 * selector and reset-release bits are clear. Native configureDPTunnelMode
+	 * tracks tunnel clients in software rather than through these gates, so
+	 * this exact state is the only additional gate configuration accepted
+	 * here, together with no enabled PLL output, no outstanding command,
+	 * and no lock. Any other gate state is refused.
 	 */
 	if (outputs & 0x54 || command & AUSPLL_APB_CMD_OVERRIDE_REQ ||
 	    status & ACIOPHY_AUSPLL_LOCK)
@@ -2017,14 +2020,14 @@ static int atc_tunnel_start(struct apple_atcphy *atcphy, u8 rate)
 	atcphy->tunnel_saved = true;
 
 	/* Native configureDPTunnelMode, first clock client; no lane mux writes. */
-	core_set32(atcphy, ACIOPHY_CFG0, BIT(2));
-	core_set32(atcphy, ACIOPHY_CFG0, BIT(3));
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_SMALL);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_SMALL_OV);
 	udelay(2);
-	core_set32(atcphy, ACIOPHY_CFG0, BIT(0));
-	core_set32(atcphy, ACIOPHY_CFG0, BIT(1));
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_BIG);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_BIG_OV);
 	udelay(2);
-	core_clear32(atcphy, ACIOPHY_CFG0, BIT(4));
-	core_set32(atcphy, ACIOPHY_CFG0, BIT(5));
+	core_clear32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_CLAMP);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_CLAMP_OV);
 	udelay(2);
 	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, 0x30);
 	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, 0xc0);
@@ -2035,14 +2038,17 @@ static int atc_tunnel_start(struct apple_atcphy *atcphy, u8 rate)
 	core_clear32(atcphy, ACIOPHY_SLEEP_CTRL, 0x300);
 	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, 0xc00);
 	udelay(2);
+	/* Additional override bit alongside RX_BIG_OV; exact meaning not independently confirmed. */
 	core_set32(atcphy, ACIOPHY_CFG0, 0xc00);
-	core_set32(atcphy, ACIOPHY_CFG0, 0x3000);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_RX_BIG_OV);
 	udelay(2);
+	/* Additional override bit alongside RX_SMALL_OV; exact meaning not independently confirmed. */
 	core_set32(atcphy, ACIOPHY_CFG0, 0xc0);
-	core_set32(atcphy, ACIOPHY_CFG0, 0x300);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_RX_SMALL_OV);
 	udelay(2);
+	/* Additional override bit alongside RX_CLAMP_OV; exact meaning not independently confirmed. */
 	core_clear32(atcphy, ACIOPHY_CFG0, 0xc000);
-	core_set32(atcphy, ACIOPHY_CFG0, 0x30000);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_RX_CLAMP_OV);
 	udelay(2);
 	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, BIT(2));
 	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, BIT(3));

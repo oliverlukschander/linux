@@ -33,12 +33,11 @@
  * verbatim from this connection's negotiation and is not itself built
  * anywhere in the traced kernel/kext code -- its origin could not be
  * pinned down statically (most likely the separate DCP coprocessor
- * firmware; see notes/2026-09-22-0110-mode-value-guess.md). The value
- * used is therefore an informed, explicitly-labeled estimate, not a
- * confirmed constant, and is passed in by the caller (mode_value below)
- * rather than fixed at compile time, so the bounded formula's one free
- * parameter can be swept across a live connection without reinstalling
- * or rebooting between values -- see 2026-09-23-0112-runtime-sweep.md:
+ * firmware). The value used is therefore an informed, explicitly-labeled
+ * estimate, not a confirmed constant, and is passed in by the caller
+ * (mode_value below) rather than fixed at compile time, so the bounded
+ * formula's one free parameter can be swept across a live connection
+ * without reinstalling or rebooting between values:
  *   - bits 4-7 of the field select a rate class using the same RBR=0/
  *     HBR=1/HBR2=2/HBR3=3 ordinal already used elsewhere in this driver
  *     (drivers/thunderbolt/tb_regs.h DP_COMMON_CAP_RATE_*); this link
@@ -51,8 +50,8 @@
  *     3-valid-value enumeration (0, 1, or 2) -- this is the weak half of
  *     the formula and the only free parameter, swept across
  *     mode_value = rate_class(2) * lane_count(4) + secondary_bit = 8, 9
- *     (already tested via separate reboots, 0110/0111, both clean with
- *     no picture), 10.
+ *     (both already tested via separate reboots, each a clean boot with
+ *     no picture), or 10.
  *
  * mode_value is bounded to APPLE_DPIN_MODE_VALUE_MAX: this caps both the
  * single bit MODE_A can set (1 << mode_value) and the field width MODE_B

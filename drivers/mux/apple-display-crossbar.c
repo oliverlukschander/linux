@@ -24,6 +24,7 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/soc/apple/dp-tunnel.h>
 
 /*
  * T602x register interface is clearly different so most of the names below are
@@ -189,16 +190,16 @@ static void t602x_dump(struct apple_dpxbar *xbar, const char *tag)
 		if (n >= (int)sizeof(buf) - 20)
 			break;
 	}
-	dev_info(xbar->dev, "t602x %s:%s\n", tag, buf);
-	dev_info(xbar->dev,
-		 "t602x %s clk: 000=%08x 800=%08x 020=%08x 820=%08x 024=%08x 81c=%08x\n",
-		 tag,
-		 readl(xbar->regs + T602X_FIFO_WR_DPTX_CLK_EN),
-		 readl(xbar->regs + FIFO_WR_DPTX_CLK_EN_STAT),
-		 readl(xbar->regs + FIFO_RD_PCLK1_EN),
-		 readl(xbar->regs + FIFO_RD_PCLK1_EN_STAT),
-		 readl(xbar->regs + T602X_FIFO_RD_PCLK2_EN),
-		 readl(xbar->regs + T602X_REG_81C_STAT));
+	dev_dbg(xbar->dev, "t602x %s:%s\n", tag, buf);
+	dev_dbg(xbar->dev,
+		"t602x %s clk: 000=%08x 800=%08x 020=%08x 820=%08x 024=%08x 81c=%08x\n",
+		tag,
+		readl(xbar->regs + T602X_FIFO_WR_DPTX_CLK_EN),
+		readl(xbar->regs + FIFO_WR_DPTX_CLK_EN_STAT),
+		readl(xbar->regs + FIFO_RD_PCLK1_EN),
+		readl(xbar->regs + FIFO_RD_PCLK1_EN_STAT),
+		readl(xbar->regs + T602X_FIFO_RD_PCLK2_EN),
+		readl(xbar->regs + T602X_REG_81C_STAT));
 }
 
 static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
@@ -311,14 +312,16 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 
 	spin_unlock_irqrestore(&dpxbar->lock, flags);
 
-	if (enable)
-		dev_info(dpxbar->dev,
-			 "Switched %s to dispext%u,%u (t602x atc=0x%x mux=0x%x)\n",
+	if (enable) {
+		dev_info(dpxbar->dev, "Switched %s to dispext%u,%u\n",
 			 apple_dpxbar_names[index], mux_state >> 1,
-			 mux_state & 1, atc_bit, mux_val);
-	else
+			 mux_state & 1);
+		dev_dbg(dpxbar->dev, "t602x atc=0x%x mux=0x%x\n", atc_bit,
+			mux_val);
+	} else {
 		dev_info(dpxbar->dev, "Switched %s to disconnected state\n",
 			 apple_dpxbar_names[index]);
+	}
 
 	t602x_dump(dpxbar, enable ? apple_dpxbar_names[index] : "idle");
 
@@ -464,14 +467,14 @@ static const struct mux_control_ops apple_dpxbar_t602x_ops = {
 };
 
 /*
- * For aurora-silicon/linux#8's dcp_tunnel_crossbar_up(): bring the
- * clock/FIFO gates up on a mux that dcp_typec_route_activate() already
- * selected. Same register set as apple_dpxbar_set_t602x()'s enable path,
- * parameterized on the live selected_dispext[index] instead of a
- * hardcoded source 2, and this index's own atc_bit instead of always
- * dpin0's.
+ * Bring the clock/FIFO gates up on a mux whose dispext source is already
+ * selected, without touching the mux selection itself -- used by
+ * dcp_tunnel_crossbar_up() for a mux that dcp_typec_route_activate()
+ * already selected. Same register set as apple_dpxbar_set_t602x()'s
+ * enable path, but parameterized on the live selected_dispext[index]
+ * instead of a hardcoded source, and this index's own atc_bit instead of
+ * always dpin0's.
  */
-int apple_dpxbar_link_up(struct mux_control *mux);
 int apple_dpxbar_link_up(struct mux_control *mux)
 {
 	struct apple_dpxbar *xbar;
@@ -503,12 +506,15 @@ int apple_dpxbar_link_up(struct mux_control *mux)
 	dpxbar_set32(xbar, T602X_FIFO_WR_UNK_EN, dispext_bit);
 	dpxbar_mask32(xbar, T602X_REG_018, GENMASK(5, 4), BIT(4));
 	/*
-	 * t602x_right_dpin0_bring_up() wrote BIT(0) here, which is both
-	 * ATC_DPIN0 and MUX_DPIN0's own enum value (1) coincidentally
-	 * overlapping at bit 0 -- this 2-bit field's real meaning was never
-	 * disambiguated for a second index. Use FIELD_PREP(..., index),
-	 * matching MUX_DPPHY=0/MUX_DPIN0=1/MUX_DPIN1=2, since that is the
-	 * interpretation consistent with the original DPIN0-only value.
+	 * The only hardware-verified value for this 2-bit field is dpin0's
+	 * BIT(0), which is both ATC_DPIN0 and MUX_DPIN0's own enum value (1)
+	 * coincidentally overlapping at bit 0 -- so this field's encoding
+	 * for a second index was never independently confirmed on real
+	 * hardware. FIELD_PREP(..., index), matching
+	 * MUX_DPPHY=0/MUX_DPIN0=1/MUX_DPIN1=2, is an inferred generalization
+	 * of that single known-good dpin0 data point, not a value verified
+	 * against dpin1 hardware. If dpin1 misbehaves, this field is a
+	 * prime suspect.
 	 */
 	dpxbar_mask32(xbar, T602X_FIFO_RD_N_CLK_EN, GENMASK(1, 0),
 		      FIELD_PREP(GENMASK(1, 0), index));
@@ -530,12 +536,11 @@ EXPORT_SYMBOL_GPL(apple_dpxbar_link_up);
 /*
  * Inverse of apple_dpxbar_link_up(): gate the clocks back down without
  * deselecting the mux or dropping CROSSBAR_ATC_EN/CROSSBAR_DISPEXT_EN --
- * ported from aurora-silicon/linux#8's own apple_dpxbar_link_down()
- * semantics ("mux selection and ATC output enable kept"). Re-asserts the
- * same reset bits apple_dpxbar_link_up() releases, so a later link_up()
- * on the same route starts from the same state as a fresh selection.
+ * mux selection and the ATC output enable are kept across a link
+ * down/up cycle. Re-asserts the same reset bits apple_dpxbar_link_up()
+ * releases, so a later link_up() on the same route starts from the same
+ * state as a fresh selection.
  */
-int apple_dpxbar_link_down(struct mux_control *mux);
 int apple_dpxbar_link_down(struct mux_control *mux)
 {
 	struct apple_dpxbar *xbar;

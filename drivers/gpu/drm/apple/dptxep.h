@@ -35,7 +35,6 @@ enum dptx_apcall {
 #define DCPDPTX_REMOTE_PORT_CORE GENMASK(3, 0)
 #define DCPDPTX_REMOTE_PORT_ATC GENMASK(7, 4)
 #define DCPDPTX_REMOTE_PORT_DIE GENMASK(11, 8)
-#define DCPDPTX_REMOTE_PORT_DPIN GENMASK(13, 12)
 #define DCPDPTX_REMOTE_PORT_CONNECTED BIT(15)
 #define DCPDPTX_REMOTE_PORT_SUPPORTS_HPD BIT(8)
 
@@ -50,7 +49,6 @@ struct apple_epic_service;
 
 struct dptx_port {
 	bool enabled, connected;
-	bool usb4_inactive_sink;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
 	u32 unit;
@@ -61,7 +59,12 @@ struct dptx_port {
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
-	/* diagnostic call counters, see notes/2026-09-23-0124-*.md */
+	/*
+	 * Per-boot invocation counters for the validate/connect/request/
+	 * release AFK calls, used together with the caller return address
+	 * logged alongside them to correlate call ordering when diagnosing
+	 * link-training sequencing issues.
+	 */
 	u32 validate_calls, connect_calls, request_calls, release_calls;
 };
 

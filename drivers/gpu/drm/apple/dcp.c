@@ -57,7 +57,6 @@
 #define APPLE_DCP_COPROC_CPU_CONTROL_RUN BIT(4)
 
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
-#define DPTX_USB4_CONNECT_DELAY msecs_to_jiffies(200)
 
 static bool show_notch;
 
@@ -561,21 +560,18 @@ int apple_dcp_tb_dp_tunnel(struct device_node *connector_np, unsigned int dpin,
 		/*
 		 * j416s-specific, not in the reference (t8103 has a single
 		 * dcpext): prefer a pipeline with a fixed output of its own
-		 * (dcpext0) for a Type-C tunnel route. dcpext1 (Type-C only)
-		 * looks like the natural choice, but extensive hardware
-		 * testing (2026-09-24, candidates 0128-0134) found it never
-		 * completes a real link for a tunnel target: DCP firmware
+		 * (dcpext0) for a Type-C tunnel route. dcpext1 (Type-C only,
+		 * no fixed output of its own) never completes link training
+		 * for a tunneled target on this hardware: DCP firmware
 		 * accepts request_display but never issues another apcall,
-		 * on every attempt. The driver-issued connect parameters are
-		 * byte-identical between the two pipelines, and nothing in
-		 * this driver's source explains the difference, so this is a
-		 * firmware-internal decision on the dcpext1 coprocessor
-		 * instance, not something fixable here. dcpext0, forced onto
-		 * the same physical port and tunnel (candidate 0135), reached
-		 * a full real AUX/DPCD link (DPRX_DONE=1) on the first
-		 * attempt and, once a stale test-environment misconfiguration
-		 * was cleared (candidates 0136-0142), a working picture --
-		 * so prefer it unconditionally for a tunnel route on this
+		 * on every attempt, even though the driver-issued connect
+		 * parameters are byte-identical between the two pipelines.
+		 * Nothing in this driver's source explains the difference,
+		 * so this is a firmware-internal decision on the dcpext1
+		 * coprocessor instance, not something fixable here. dcpext0,
+		 * forced onto the same physical port and tunnel, reaches a
+		 * full AUX/DPCD link (DPRX_DONE=1) and a working picture, so
+		 * it is preferred unconditionally for a tunnel route on this
 		 * hardware.
 		 */
 		if (!candidate->dcp->fixed_phy)
@@ -1345,14 +1341,12 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 }
 
 /*
- * Diagnostic (candidate 0130, see notes/2026-09-24-0130-*.md): widening
- * set_hpd's own timeout in 0129 confirmed a real, slower DCP reply was
- * being cut off there -- the failure just moved to this next wait
- * instead (DEVICE_NOT_RESPONDING/DEVICE_NOT_STARTED fire, then this
- * completion times out with no SET_LINK_RATE/WILL_CHANGE_LINK_CONFIG
- * burst at all). Widening this one too, same single-variable logic,
- * to see whether that burst is also just running late or genuinely
- * never coming on this pipeline/port regardless of patience.
+ * DCP's tunnel handshake round-trip through the Thunderbolt DP IN
+ * adapter can take longer than a direct-PHY connection, so both the
+ * connect wait and the reconnect policy need more headroom than a
+ * direct connection does. An 8s connect timeout with a single
+ * reconnect retry is the tested, working configuration for a
+ * tunneled connection.
  */
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(8000)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
@@ -1384,7 +1378,6 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
-	dcp->dptxport[port].usb4_inactive_sink = false;
 	/*
 	 * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel uses
 	 * the exact same connect path as a direct alt-mode PHY. The only
@@ -1424,15 +1417,13 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	dcp->dptxport[port].connected = true;
 	if (dcp_is_typec_output(dcp)) {
 		/*
-		 * Diagnostic (candidate 0129, see notes/2026-09-24-0129-*.md):
-		 * every dcpext1 run so far stalls exactly here, and every
-		 * outbound AFK call after it, at the normal 1000ms budget --
-		 * while tb_dp_wait_dprx()'s independent poll (generic
-		 * thunderbolt/tunnel.c, started at tunnel-up, 12000ms budget,
-		 * unaffected by this call either way) also never sees DPRX
-		 * assert. Widening only this one call's timeout exposes
-		 * whether DCP replies late (a real internal retry we were
-		 * cutting off) or never at all.
+		 * DCP's reply to this call can take longer than the normal
+		 * 1000ms budget when the connection is a Thunderbolt DP
+		 * tunnel, so widen the timeout to 8000ms for a Type-C/
+		 * tunneled output. This is independent of
+		 * tb_dp_wait_dprx()'s own 12000ms poll for DPRX (generic
+		 * thunderbolt/tunnel.c, started at tunnel-up), which is
+		 * unaffected by this call either way.
 		 */
 		ret = dptxport_set_hpd_timeout(dcp->dptxport[port].service,
 					       true, 8000);
@@ -1504,21 +1495,6 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 
 	dev_err(dcp->dev, "Type-C DPTX reconnect failed after %u retries: %d\n",
 		dcp->typec_reconnect_tries, ret);
-}
-
-static void dcp_usb4_hpd_work(struct work_struct *work)
-{
-	struct apple_dcp *dcp =
-		container_of(to_delayed_work(work), struct apple_dcp,
-			     usb4_hpd_wq);
-	int ret;
-
-	if (!dcp->dptxport[0].service || !dcp->dptxport[0].enabled)
-		return;
-	dev_info(dcp->dev, "USB4: kick DPTX HPD after INACTIVE_SINK\n");
-	ret = dptxport_set_hpd(dcp->dptxport[0].service, true);
-	if (ret)
-		dev_warn(dcp->dev, "USB4: HPD kick failed: %d\n", ret);
 }
 
 static void disconnected_hpd_event(struct apple_connector *con)
@@ -2380,7 +2356,6 @@ static int dcp_platform_probe(struct platform_device *pdev)
 			  dcp_typec_reconnect_work);
 	INIT_DELAYED_WORK(&dcp->typec_fabric_retrain_wq,
 			  dcp_typec_retrain_work);
-	INIT_DELAYED_WORK(&dcp->usb4_hpd_wq, dcp_usb4_hpd_work);
 	/*
 	 * Type-C and Thunderbolt routes can be activated as soon as they are
 	 * registered below (dcp_register_typec_routes()), before the DRM
@@ -2534,7 +2509,6 @@ static void dcp_platform_shutdown(struct platform_device *pdev)
 		WRITE_ONCE(dcp->typec_cable_connected, false);
 		cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 		cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
-		cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
 	}
 	component_del(&pdev->dev, &dcp_comp_ops);
 }
@@ -2546,7 +2520,6 @@ static int dcp_platform_suspend(struct device *dev)
 	WRITE_ONCE(dcp->typec_cable_connected, false);
 	cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 	cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
-	cancel_delayed_work_sync(&dcp->usb4_hpd_wq);
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);

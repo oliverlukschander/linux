@@ -818,37 +818,6 @@ static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out, void *cookie)
 	dcp_set_parameter_dcp(dcp, false, &param, dcp_on_set_power_state, cookie);
 }
 
-/*
- * Panel power-on uses display-device handle 0 and then set_power_state.
- * dcpext is not the main display, so iomfb_poweron() takes handle 2 and
- * does not raise fDisplayPowerState. USB4 link training never sees a
- * DPTX clock. This is the handle-0 sequence only: no modeset.
- */
-void DCP_FW_NAME(iomfb_poweron_pipe)(struct apple_dcp *dcp)
-{
-	struct dcp_wait_cookie *cookie;
-	u32 handle = 0;
-	int ret;
-
-	dev_info(dcp->dev, "USB4 pipe power handle 0 starting\n");
-	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
-	if (!cookie)
-		return;
-
-	init_completion(&cookie->done);
-	kref_init(&cookie->refcount);
-	kref_get(&cookie->refcount);
-	dcp_set_display_device(dcp, false, &handle, dcp_on_set_power_state,
-			       cookie);
-	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(10000));
-	if (ret == 0)
-		dev_warn(dcp->dev, "USB4 pipe power timed out\n");
-	else if (ret > 0)
-		dev_info(dcp->dev, "USB4 pipe power returned, %d ms remaining\n",
-			 jiffies_to_msecs(ret));
-	kref_put(&cookie->refcount, release_wait_cookie);
-}
-
 void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
 {
 	struct dcp_wait_cookie *cookie;

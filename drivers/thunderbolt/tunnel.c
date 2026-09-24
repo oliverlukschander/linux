@@ -15,11 +15,6 @@
 #include <linux/string.h>
 #include <linux/string_helpers.h>
 
-int tb_apple_dp_in_hpd;
-EXPORT_SYMBOL_GPL(tb_apple_dp_in_hpd);
-int tb_apple_dp_typec_index = -1;
-EXPORT_SYMBOL_GPL(tb_apple_dp_typec_index);
-
 #include "tunnel.h"
 #include "tb.h"
 
@@ -1063,9 +1058,9 @@ static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)
 	 * Initial allocation should be 0 according the spec, which relies
 	 * on the DP IN adapter later raising it via a bandwidth request
 	 * notification. The Apple j416s right-hand ACIO DP IN adapter has
-	 * never been observed to generate that notification: 0102-0107 all
-	 * completed link training and a full DCP frame with this field
-	 * (DP_STATUS allocated-bandwidth) still reading 0 and no picture.
+	 * never been observed to generate that notification: link training
+	 * and a full DCP frame complete with this field (DP_STATUS
+	 * allocated-bandwidth) still reading 0 and no picture.
 	 * On that one route only, grant the already-computed non-reduced
 	 * bandwidth immediately, capped at what the connection manager
 	 * already reserved for this tunnel (estimated_bw), instead of
@@ -1226,13 +1221,12 @@ static void tb_dp_dprx_stop(struct tb_tunnel *tunnel)
  * connector wired to it, so nothing ever sets its own ADP_DP_CS_2_HPD --
  * pulse ADP_DP_CS_3_HPD_PROPAGATE to tell it to propagate HPD itself, and
  * wait for it to take, same as aurora-silicon/linux#8's hardware-tested
- * t8103 implementation (three docks, multiple monitors). Diagnostic
- * candidate 0131: on this project's own hardware, the CS0-CS13 registers
- * this pulse should move have been observed completely static across
- * every dcpext1/right-port failure so far (0128-0130), unlike the one
- * success (0127, dcpext0/left-port) -- see notes/2026-09-24-0131-*.md.
- * Logs and continues either way; a failed pulse is not treated as a fatal
- * tunnel-activation error, matching the reference.
+ * t8103 implementation (three docks, multiple monitors). On the
+ * dcpext1/right-port path, the CS0-CS13 registers this pulse is meant to
+ * move have been observed to stay completely static across every
+ * failure, unlike the working dcpext0/left-port case. Logs and continues
+ * either way; a failed pulse is not treated as a fatal tunnel-activation
+ * error, matching the reference.
  */
 static void tb_dp_apple_pulse_hpd(struct tb_port *in)
 {
@@ -1276,6 +1270,7 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 
 	if (active) {
 		struct tb_path **paths;
+		const struct tb_nhi_ops *ops;
 		int last;
 
 		paths = tunnel->paths;
@@ -1291,16 +1286,13 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 			paths[TB_DP_AUX_PATH_IN]->hops[0].in_hop_index,
 			paths[TB_DP_AUX_PATH_OUT]->hops[last].next_hop_index);
 
-		if (tb_nhi_is_apple(tunnel->tb->nhi)) {
-			const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
-
-			if (ops && ops->dp_tunnel_pre_activate) {
-				ret = ops->dp_tunnel_pre_activate(
-					tunnel->tb->nhi, tunnel->src_port,
-					tunnel->dst_port);
-				if (ret)
-					return ret;
-			}
+		ops = tunnel->tb->nhi->ops;
+		if (ops && ops->dp_tunnel_pre_activate) {
+			ret = ops->dp_tunnel_pre_activate(
+				tunnel->tb->nhi, tunnel->src_port,
+				tunnel->dst_port);
+			if (ret)
+				return ret;
 		}
 	} else {
 		tb_dp_dprx_stop(tunnel);
@@ -1317,9 +1309,8 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 	 * (tb.h) -- deterministically, not just on hardware timing. Do not
 	 * let that skip ops->dp_tunnel_deactivate() below: this tunnel.c is
 	 * generic core code, but ops->dp_tunnel_deactivate is what apple.c
-	 * relies on to clear its own apple_dpin_ctx latch (candidate 0138,
-	 * see notes/2026-09-24-0138-*.md) -- without it, a physical
-	 * unplug/replug can never re-arm a fresh connect. The caller
+	 * relies on to clear its own apple_dpin_ctx latch -- without it, a
+	 * physical unplug/replug can never re-arm a fresh connect. The caller
 	 * (tb_tunnel_deactivate()) already discards this function's return
 	 * value on the deactivate path, so relaxing it here changes nothing
 	 * any caller observes; the activate (active=true) path is untouched.
@@ -1339,7 +1330,7 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 		 * host's DPTX through the tunnel; keep this DP OUT adapter
 		 * from starting link training on its own, and hand it back
 		 * once the tunnel is gone. Ported from aurora-silicon/
-		 * linux#8; candidate 0132, see notes/2026-09-24-0132-*.md.
+		 * linux#8.
 		 */
 		if (active && apple_dpin &&
 		    !tb_port_read(out, &v, TB_CFG_PORT, out->cap_adap + ADP_DP_CS_3, 1)) {
@@ -1692,8 +1683,7 @@ static int tb_dp_init_video_credits(struct tb_path_hop *hop)
 
 	/*
 	 * Apple silicon host DP IN adapters take 5 NFC credits for the
-	 * video path -- same source as the HPD/NO_AUTO_LT handling above;
-	 * candidate 0132, see notes/2026-09-24-0132-*.md.
+	 * video path -- same source as the HPD/NO_AUTO_LT handling above.
 	 */
 	if (tb_nhi_is_apple(port->sw->tb->nhi) && !tb_route(port->sw) &&
 	    tb_port_is_dpin(port)) {
@@ -1753,9 +1743,10 @@ static int tb_dp_init_video_path(struct tb_path *path, bool pm_support)
 
 		/*
 		 * Second checkpoint: the downstream router's ingress side of
-		 * the same path (e.g. the hub's upstream link), so a 0105/
-		 * 0106-style attach can show whether DP-IN traffic actually
-		 * crosses into the far end, not just leaves the host.
+		 * the same path (e.g. the hub's upstream link), so comparing
+		 * its counter against the first checkpoint can show whether
+		 * DP-IN traffic actually crosses into the far end, not just
+		 * leaves the host.
 		 */
 		if (last != &path->hops[0]) {
 			last->in_counter_index = 0;
@@ -1788,12 +1779,12 @@ static void tb_dp_dump_apple_adapter(struct tb_port *port, const char *tag)
 		if (ret)
 			w[i] = 0xffffffff;
 	}
-	tb_port_warn(port,
-		     "%s CS0=%08x CS1=%08x CS2=%08x CS3=%08x LOCAL=%08x REMOTE=%08x STAT=%08x COMMON=%08x CS8=%08x VE=%u AE=%u HPD=%u DPRX=%u\n",
-		     tag, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8],
-		     !!(w[0] & ADP_DP_CS_0_VE), !!(w[0] & ADP_DP_CS_0_AE),
-		     !!(w[2] & ADP_DP_CS_2_HPD),
-		     !!(w[7] & DP_COMMON_CAP_DPRX_DONE));
+	tb_port_dbg(port,
+		    "%s CS0=%08x CS1=%08x CS2=%08x CS3=%08x LOCAL=%08x REMOTE=%08x STAT=%08x COMMON=%08x CS8=%08x VE=%u AE=%u HPD=%u DPRX=%u\n",
+		    tag, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8],
+		    !!(w[0] & ADP_DP_CS_0_VE), !!(w[0] & ADP_DP_CS_0_AE),
+		    !!(w[2] & ADP_DP_CS_2_HPD),
+		    !!(w[7] & DP_COMMON_CAP_DPRX_DONE));
 }
 
 static int tb_apple_nhi_typec_index(struct tb_nhi *nhi)
@@ -1824,12 +1815,9 @@ static void tb_dp_dump_apple(struct tb_tunnel *tunnel)
 	if (!tb_port_read(tunnel->src_port, &cs2, TB_CFG_PORT,
 			  tunnel->src_port->cap_adap + ADP_DP_CS_2, 1)) {
 		hpd = !!(cs2 & ADP_DP_CS_2_HPD);
-		tb_apple_dp_in_hpd = hpd;
-		tb_apple_dp_typec_index =
-			tb_apple_nhi_typec_index(tunnel->tb->nhi);
-		tb_tunnel_warn(tunnel,
-			       "Apple: DP IN HPD=%d typec=%d (DPTX should use this adapter, not ATC)\n",
-			       hpd, tb_apple_dp_typec_index);
+		tb_tunnel_dbg(tunnel,
+			      "Apple: DP IN HPD=%d typec=%d (DPTX should use this adapter, not ATC)\n",
+			      hpd, tb_apple_nhi_typec_index(tunnel->tb->nhi));
 	}
 }
 

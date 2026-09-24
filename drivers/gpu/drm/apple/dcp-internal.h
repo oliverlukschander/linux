@@ -276,7 +276,6 @@ struct apple_dcp {
 
 	struct apple_dcp_afkep *systemep;
 	struct completion systemep_done;
-	struct apple_epic_service *system_service;
 
 	struct apple_dcp_afkep *ibootep;
 	struct apple_dcp_afkep *dcpavservep;
@@ -304,8 +303,6 @@ struct apple_dcp {
 	bool typec_cable_connected;
 	struct delayed_work typec_reconnect_wq;
 	struct delayed_work typec_fabric_retrain_wq;
-	struct delayed_work usb4_hpd_wq;
-	bool usb4_hpd_kicked;
 	u32 typec_reconnect_tries;
 
 	/* Ported from aurora-silicon/linux#8. */
