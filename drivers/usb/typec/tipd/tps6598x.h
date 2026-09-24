@@ -319,6 +319,8 @@ struct tps6598x {
 	u16 pwr_status;
 	struct delayed_work	wq_poll;
 
+	struct notifier_block pm_nb;
+
 	const struct tipd_data *data;
 };
 

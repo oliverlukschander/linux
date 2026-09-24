@@ -22,6 +22,7 @@
 #include <linux/usb/role.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
+#include <linux/suspend.h>
 
 #include "tps6598x.h"
 #include "trace.h"
@@ -1845,6 +1846,8 @@ static void cd321x_remove(struct tps6598x *tps)
 	usb_role_switch_set_role(tps->role_sw, USB_ROLE_NONE);
 }
 
+static int tipd_pm_notify(struct notifier_block *nb, unsigned long action, void *data);
+
 int tipd_init(struct tps6598x *tps)
 {
 	struct fwnode_handle *fwnode;
@@ -1950,6 +1953,11 @@ int tipd_init(struct tps6598x *tps)
 		enable_irq_wake(tps->irq);
 	}
 
+	if (tps->data->resume_reverify) {
+		tps->pm_nb.notifier_call = tipd_pm_notify;
+		register_pm_notifier(&tps->pm_nb);
+	}
+
 	return 0;
 
 err_disconnect:
@@ -1972,6 +1980,9 @@ EXPORT_SYMBOL_GPL(tipd_init);
 
 void tipd_remove(struct tps6598x *tps)
 {
+	if (tps->data->resume_reverify)
+		unregister_pm_notifier(&tps->pm_nb);
+
 	if (!tps->irq)
 		cancel_delayed_work_sync(&tps->wq_poll);
 	else
@@ -2034,12 +2045,36 @@ int tipd_resume(struct tps6598x *tps)
 		queue_delayed_work(system_power_efficient_wq, &tps->wq_poll,
 				   msecs_to_jiffies(POLL_INTERVAL));
 
-	if (tps->data->resume_reverify)
-		tps->data->resume_reverify(tps);
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tipd_resume);
+
+/*
+ * tipd_resume() runs as an ordinary device .resume() callback, which can
+ * complete well before the rest of the system -- ACIO/Thunderbolt, DCP,
+ * the crossbar -- has finished its own resume work. Driving the reconnect
+ * from here directly (as originally tried) fires apple_cio_start()'s
+ * M3/PMGR reset-deassert handshake while that firmware is potentially
+ * still busy servicing other subsystems' resume, and can exhaust its
+ * retry budget outright -- confirmed on hardware, see
+ * notes/2026-09-24-0147-typec-resume-reverify.md. A real physical
+ * replug never hits this because a human always does it well after
+ * the whole system has settled.
+ *
+ * PM_POST_SUSPEND is delivered strictly after dpm_resume_end() --
+ * i.e. after every device, including ACIO/Thunderbolt, has completed
+ * its own ordinary resume -- so triggering the reverify from here
+ * instead removes the race without needing any arbitrary delay.
+ */
+static int tipd_pm_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct tps6598x *tps = container_of(nb, struct tps6598x, pm_nb);
+
+	if (action == PM_POST_SUSPEND && tps->data->resume_reverify)
+		tps->data->resume_reverify(tps);
+
+	return NOTIFY_DONE;
+}
 
 const struct tipd_data tipd_cd321x_data = {
 	.irq_handler = cd321x_interrupt,
