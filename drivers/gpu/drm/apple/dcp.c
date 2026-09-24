@@ -1376,7 +1376,17 @@ bool dcp_has_typec_routes(struct platform_device *pdev)
 	return dcp->nr_typec_routes;
 }
 
-#define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
+/*
+ * Diagnostic (candidate 0130, see notes/2026-09-24-0130-*.md): widening
+ * set_hpd's own timeout in 0129 confirmed a real, slower DCP reply was
+ * being cut off there -- the failure just moved to this next wait
+ * instead (DEVICE_NOT_RESPONDING/DEVICE_NOT_STARTED fire, then this
+ * completion times out with no SET_LINK_RATE/WILL_CHANGE_LINK_CONFIG
+ * burst at all). Widening this one too, same single-variable logic,
+ * to see whether that burst is also just running late or genuinely
+ * never coming on this pipeline/port regardless of patience.
+ */
+#define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(8000)
 #define DPTX_RECONNECT_DELAY msecs_to_jiffies(1000)
 #define DPTX_RECONNECT_RETRIES 1
 
