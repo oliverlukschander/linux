@@ -1445,7 +1445,19 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	}
 	dcp->dptxport[port].connected = true;
 	if (dcp_is_typec_output(dcp)) {
-		ret = dptxport_set_hpd(dcp->dptxport[port].service, true);
+		/*
+		 * Diagnostic (candidate 0129, see notes/2026-09-24-0129-*.md):
+		 * every dcpext1 run so far stalls exactly here, and every
+		 * outbound AFK call after it, at the normal 1000ms budget --
+		 * while tb_dp_wait_dprx()'s independent poll (generic
+		 * thunderbolt/tunnel.c, started at tunnel-up, 12000ms budget,
+		 * unaffected by this call either way) also never sees DPRX
+		 * assert. Widening only this one call's timeout exposes
+		 * whether DCP replies late (a real internal retry we were
+		 * cutting off) or never at all.
+		 */
+		ret = dptxport_set_hpd_timeout(dcp->dptxport[port].service,
+					       true, 8000);
 		if (ret) {
 			dev_err(dcp->dev,
 				"dcp_dptx_connect: failed to assert Type-C HPD: %d\n",
