@@ -53,7 +53,6 @@ struct dptx_port {
 	bool usb4_inactive_sink;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
-	struct completion usb4_lane_completion;
 	u32 unit;
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;

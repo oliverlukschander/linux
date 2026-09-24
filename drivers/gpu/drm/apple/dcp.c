@@ -64,8 +64,6 @@ static bool show_notch;
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
 
-static bool usb4_force_dptx;
-
 /* Opt-in, one attempt per module lifetime; never a live parameter write. */
 static bool usb4_protocol_probe;
 module_param(usb4_protocol_probe, bool, 0444);
@@ -98,11 +96,6 @@ MODULE_PARM_DESC(usb4_route_prefer_fixed_diag,
 bool dcp_usb4_protocol_probe_enabled(void)
 {
 	return usb4_protocol_probe;
-}
-
-bool dcp_usb4_drm_allowed(void)
-{
-	return usb4_force_dptx;
 }
 
 bool hdmi_audio;

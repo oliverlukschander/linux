@@ -441,12 +441,27 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	if (lane_count > 0) {
 		dev_info(dcp->dev, "USB4/DPTX: SET_ACTIVE_LANE_COUNT %llu\n",
 			 lane_count);
-		if (dcp_is_usb4_output(dcp)) {
-			complete(&dptx->usb4_lane_completion);
-			if (dcp_usb4_drm_allowed())
-				complete(&dptx->linkcfg_completion);
-		} else
-			complete(&dptx->linkcfg_completion);
+		/*
+		 * dcp_usb4_drm_allowed() (usb4_force_dptx) used to gate this
+		 * for the old manual-training sysfs knob (module_param_cb
+		 * usb4_dptx_train), removed wholesale in 0dc9f50 when
+		 * apple_dcp_tb_dp_tunnel() replaced it with automatic tunnel
+		 * detection -- but usb4_force_dptx itself, and this gate,
+		 * were left behind with no way left to ever set it true.
+		 * dcp_dptx_connect()'s single wait_for_completion_timeout()
+		 * on linkcfg_completion is now shared by both the alt-mode
+		 * and USB4-tunnel paths (also part of 0dc9f50's unification),
+		 * so gating it here meant every tunneled connect timed out
+		 * after a fully successful DPRX/AUX handshake and lane
+		 * negotiation, on every candidate since 0127 -- firmware
+		 * does not send FORCE_HOTPLUG_DETECT (the only other
+		 * completion site) for a tunnel. The reference
+		 * (aurora-silicon/linux#8) completes linkcfg_completion here
+		 * unconditionally; usb4_lane_completion has no consumer
+		 * anywhere in this tree (grep confirms), so drop both the
+		 * dead gate and the dead completion and match the reference.
+		 */
+		complete(&dptx->linkcfg_completion);
 	}
 
 	return ret;
@@ -842,8 +857,6 @@ int dptxep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->dptxport[1].enable_completion);
 	init_completion(&dcp->dptxport[0].linkcfg_completion);
 	init_completion(&dcp->dptxport[1].linkcfg_completion);
-	init_completion(&dcp->dptxport[0].usb4_lane_completion);
-	init_completion(&dcp->dptxport[1].usb4_lane_completion);
 
 	dcp->dptxep = afk_init(dcp, DPTX_ENDPOINT, dptxep_ops);
 	if (IS_ERR(dcp->dptxep))
