@@ -1039,13 +1039,23 @@ static void apple_dp_aux_work(struct work_struct *work)
 		tb_port_warn(port, "DP IN DPRX_DONE=1 (ACIO AUX completed)\n");
 
 	anhi->dp_aux_polls++;
+	/*
+	 * Diagnostic (candidate 0133, see notes/2026-09-24-0133-*.md): dump
+	 * the analog block on every poll, not just the last one. Every
+	 * host-side register fix so far (0129-0132) leaves DCP's own
+	 * ~5-second internal wait before DEVICE_NOT_RESPONDING unchanged, so
+	 * the open question is what (if anything) the ACIO analog block
+	 * itself is doing during that window -- not yet observed, since the
+	 * only prior dump was a single snapshot after the whole 12s poll
+	 * budget was already spent.
+	 */
+	if (anhi->acio)
+		apple_dp_dump_analog(anhi->acio,
+				     dprx ? "dpin0 analog DPRX done" :
+					    "dpin0 analog poll");
 	if (!dprx && anhi->dp_aux_polls < APPLE_DP_AUX_POLL_MAX) {
 		mod_delayed_work(system_wq, &anhi->dp_aux_work,
 				 msecs_to_jiffies(APPLE_DP_AUX_POLL_MS));
-	} else if (anhi->acio) {
-		apple_dp_dump_analog(anhi->acio,
-				     dprx ? "dpin0 analog DPRX done" :
-					    "dpin0 analog at timeout");
 	}
 
 out_unlock:
