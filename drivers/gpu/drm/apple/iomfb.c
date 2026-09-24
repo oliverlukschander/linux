@@ -283,6 +283,23 @@ void dcp_hotplug(struct work_struct *work)
 	dev_info(dcp->dev, "%s() connected:%d valid_mode:%d nr_modes:%u\n", __func__,
 		 connector->connected, dcp->valid_mode, dcp->nr_modes);
 
+	/*
+	 * Diagnostic (candidate 0139): report whether this connector has an
+	 * active CRTC bound and what mode it already holds, unconditionally
+	 * (not gated on dcp_is_usb4_output), so a next capture can tell
+	 * whether Hyprland ever actually committed anything for a
+	 * USB4-tunneled connector versus never touching it at all.
+	 */
+	{
+		struct drm_crtc *crtc = connector->base.state ?
+					 connector->base.state->crtc : NULL;
+		dev_info(dcp->dev,
+			 "%s: crtc=%p active=%d mode=%dx%d\n", __func__,
+			 crtc, crtc && crtc->state ? crtc->state->active : -1,
+			 crtc && crtc->state ? crtc->state->mode.hdisplay : -1,
+			 crtc && crtc->state ? crtc->state->mode.vdisplay : -1);
+	}
+
 	if (!connector->connected) {
 		drm_edid_free(connector->drm_edid);
 		connector->drm_edid = NULL;
@@ -516,8 +533,21 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
 		return 0;
 
 	/* ignore no mode, poweroff is handled elsewhere */
-	if (crtc_state->mode.hdisplay == 0 && crtc_state->mode.vdisplay == 0)
+	if (crtc_state->mode.hdisplay == 0 && crtc_state->mode.vdisplay == 0) {
+		/*
+		 * Diagnostic (candidate 0139, see notes/2026-09-24-0139-*.md):
+		 * a USB4-tunneled connector has been observed stuck applying
+		 * a 0x0 mode with no picture. This silent bail-out is the
+		 * only place that would ever run for such a commit -- log
+		 * whether it's actually reached, and whether the CRTC is
+		 * active, to tell a real-but-degenerate atomic commit apart
+		 * from no commit ever landing at all.
+		 */
+		dev_info(dcp->dev,
+			 "%s: 0x0 commit for crtc active=%d (usb4=%d)\n",
+			 __func__, crtc_state->active, dcp_is_usb4_output(dcp));
 		return 0;
+	}
 
 	switch (dcp->fw_compat) {
 	case DCP_FIRMWARE_V_12_3:
