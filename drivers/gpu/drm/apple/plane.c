@@ -32,8 +32,20 @@ static int apple_plane_atomic_check(struct drm_plane *plane,
 		return 0;
 
 	crtc_state = drm_atomic_get_crtc_state(state, new_plane_state->crtc);
-	if (IS_ERR(crtc_state))
+	if (IS_ERR(crtc_state)) {
+		/*
+		 * Diagnostic (candidate 0139, see notes/2026-09-24-0139-*.md):
+		 * a USB4-tunneled connector's plane commit was observed
+		 * failing atomic TEST_ONLY with EINVAL for every candidate
+		 * mode Hyprland/Aquamarine tried (800x600 down to 640x480),
+		 * with no log trace anywhere in this function's silent
+		 * return paths. Log every exit to find which one fires.
+		 */
+		dev_info(state->dev->dev,
+			 "%s: plane=%d crtc_state error: %ld\n", __func__,
+			 plane->base.id, PTR_ERR(crtc_state));
 		return PTR_ERR(crtc_state);
+	}
 
 	/*
 	 * DCP limits downscaling to 2x and upscaling to 4x. Attempting to
@@ -51,11 +63,24 @@ static int apple_plane_atomic_check(struct drm_plane *plane,
 						  FRAC_16_16(1, 2),
 						  FRAC_16_16(4, 1),
 						  true, true);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_info(state->dev->dev,
+			 "%s: plane=%d crtc=%d mode=%dx%d fb=%dx%d ret=%d\n",
+			 __func__, plane->base.id, new_plane_state->crtc->base.id,
+			 crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+			 new_plane_state->fb ? new_plane_state->fb->width : -1,
+			 new_plane_state->fb ? new_plane_state->fb->height : -1,
+			 ret);
 		return ret;
+	}
 
-	if (!new_plane_state->visible)
+	if (!new_plane_state->visible) {
+		dev_info(state->dev->dev,
+			 "%s: plane=%d not visible, mode=%dx%d\n", __func__,
+			 plane->base.id, crtc_state->mode.hdisplay,
+			 crtc_state->mode.vdisplay);
 		return 0;
+	}
 
 	/*
 	 * DCP does not allow a surface to clip off the screen, and will crash
@@ -86,8 +111,15 @@ static int apple_plane_atomic_check(struct drm_plane *plane,
 	 * Pitches have to be 64-byte aligned.
 	 */
 	for (u32 i = 0; i < new_plane_state->fb->format->num_planes; i++)
-		if (new_plane_state->fb->pitches[i] & 63)
+		if (new_plane_state->fb->pitches[i] & 63) {
+			dev_info(state->dev->dev,
+				 "%s: plane=%d unaligned pitch[%u]=%u fb=%dx%d\n",
+				 __func__, plane->base.id, i,
+				 new_plane_state->fb->pitches[i],
+				 new_plane_state->fb->width,
+				 new_plane_state->fb->height);
 			return -EINVAL;
+		}
 
 	/*
 	 * FIXME: dcp can currently only use multi-planar buffers using the same
@@ -101,10 +133,19 @@ static int apple_plane_atomic_check(struct drm_plane *plane,
 		const struct drm_gem_object *first = new_plane_state->fb->obj[0];
 		for (u32 i = 1; i < new_plane_state->fb->format->num_planes; i++)
 			if (new_plane_state->fb->obj[i] != NULL &&
-			    new_plane_state->fb->obj[i] != first)
+			    new_plane_state->fb->obj[i] != first) {
+				dev_info(state->dev->dev,
+					 "%s: plane=%d mismatched multi-plane obj[%u]\n",
+					 __func__, plane->base.id, i);
 				return -EINVAL;
+			}
 	}
 
+	dev_info(state->dev->dev,
+		 "%s: plane=%d crtc=%d mode=%dx%d fb=%dx%d OK\n", __func__,
+		 plane->base.id, new_plane_state->crtc->base.id,
+		 crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+		 new_plane_state->fb->width, new_plane_state->fb->height);
 	return 0;
 }
 
