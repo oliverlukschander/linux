@@ -1358,6 +1358,21 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
+	/*
+	 * Diagnostic (candidate 0141): the tunnel connector's plane
+	 * atomic_check never fires and every Aquamarine commit fails
+	 * ATOMIC_TEST_ONLY with EINVAL, unchanged before and after removing
+	 * the possible_crtcs exclusion (0140). Log every reach of this
+	 * per-CRTC hook to see whether the generic core even gets this far
+	 * for dcpext0's CRTC during a failed attempt, or rejects the
+	 * transaction earlier (encoder/CRTC pairing) before any driver hook
+	 * for this CRTC runs at all.
+	 */
+	dev_info(dcp->dev,
+		 "dcp_crtc_atomic_check: crtc=%d mode=%dx%d active=%d enable=%d\n",
+		 crtc->base.id, crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+		 crtc_state->active, crtc_state->enable);
+
 	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
 	if (!needs_modeset && (!dcp->connector || !dcp->connector->connected)) {
 		/*

@@ -467,17 +467,33 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 
 		for (i = 0; i < num_dcp; i++) {
 			struct apple_dcp *candidate = platform_get_drvdata(dcp[i]);
+			bool native_route = dcp_usb4_native_route(idx);
+			bool has_candidate = dcp_typec_port_has_candidate(idx, dcp[i]);
 
 			/*
-			 * Userspace caches possible_crtcs before the hub is attached.
-			 * The native test owns dcpext1; advertise only that CRTC
-			 * from registration, not a wider mask narrowed at hotplug.
+			 * Diagnostic (candidate 0141, see notes/2026-09-24-0141-*.md):
+			 * 0140 dropped usb4_native_dpin/usb4_protocol_probe so
+			 * native_route should read false here now, but the tunnel
+			 * connector's plane atomic_check still never fires and
+			 * every Aquamarine commit still fails ATOMIC_TEST_ONLY
+			 * with EINVAL, unchanged. Log the actual computed
+			 * contribution per candidate to see directly whether this
+			 * exclusion is (still) why dcpext0's CRTC bit is missing
+			 * from this port's possible_crtcs, or whether it never was.
 			 */
-			if (dcp_usb4_native_route(idx) && candidate->index != 2)
+			drm_info(drm,
+				 "typec port %u candidate dcp-index=%u native_route=%d has_candidate=%d crtc_mask=0x%x\n",
+				 idx, candidate->index, native_route, has_candidate,
+				 crtc_mask[i]);
+
+			if (native_route && candidate->index != 2)
 				continue;
-			if (dcp_typec_port_has_candidate(idx, dcp[i]))
+			if (has_candidate)
 				mask |= crtc_mask[i];
 		}
+
+		drm_info(drm, "typec port %u final possible_crtcs mask=0x%x\n",
+			 idx, mask);
 
 		if (!mask) {
 			drm_warn(drm, "Type-C port %u has no display pipeline\n",
