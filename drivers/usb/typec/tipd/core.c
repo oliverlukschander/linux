@@ -902,6 +902,44 @@ static int cd321x_connect(struct tps6598x *tps, u32 status)
 	return 0;
 }
 
+/*
+ * A cable that was already attached before a suspend/resume cycle generates
+ * no fresh attach event on resume: the PD controller's own status hasn't
+ * changed, so cd321x_connect()'s diff against its last cached status sees
+ * nothing different and cd321x_update_work() takes its "nothing to do"
+ * path. Meanwhile thunderbolt-core's own noirq-phase resume handling
+ * (tb_free_invalid_tunnels()) has already torn down any USB4/TBT tunnel
+ * that didn't survive the sleep at the link level -- and nothing else
+ * re-establishes it.
+ *
+ * Reproduce a genuine unplug-then-replug in software instead of inventing
+ * a new code path: call the existing connect() callback once with the
+ * current status but PLUG_PRESENT cleared (a synthetic disconnect), then
+ * again with the real, current status. Both updates land on the same
+ * debounced work item, which coalesces them into a single run with
+ * was_disconnected=true and the correct final state -- exactly the same
+ * teardown-then-bring-up sequence, through the same already-validated
+ * apple_cio_tbt_switch_set() path, that a real physical replug drives.
+ */
+static void cd321x_resume_reverify(struct tps6598x *tps)
+{
+	u32 status;
+
+	if (!tps6598x_read_status(tps, &status))
+		return;
+
+	if (!(status & TPS_STATUS_PLUG_PRESENT))
+		return;
+
+	if (!tps6598x_read_power_status(tps))
+		return;
+	if (!tps->data->read_data_status(tps))
+		return;
+
+	tps->data->connect(tps, status & ~TPS_STATUS_PLUG_PRESENT);
+	tps->data->connect(tps, status);
+}
+
 static irqreturn_t cd321x_interrupt(int irq, void *data)
 {
 	struct tps6598x *tps = data;
@@ -1996,6 +2034,9 @@ int tipd_resume(struct tps6598x *tps)
 		queue_delayed_work(system_power_efficient_wq, &tps->wq_poll,
 				   msecs_to_jiffies(POLL_INTERVAL));
 
+	if (tps->data->resume_reverify)
+		tps->data->resume_reverify(tps);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tipd_resume);
@@ -2017,6 +2058,7 @@ const struct tipd_data tipd_cd321x_data = {
 	.reset = cd321x_reset,
 	.switch_power_state = cd321x_switch_power_state,
 	.connect = cd321x_connect,
+	.resume_reverify = cd321x_resume_reverify,
 };
 EXPORT_SYMBOL_GPL(tipd_cd321x_data);
 
@@ -2075,6 +2117,7 @@ const struct tipd_data tipd_sn201202x_data = {
 	.reset = cd321x_reset,
 	.switch_power_state = cd321x_switch_power_state,
 	.connect = cd321x_connect,
+	.resume_reverify = cd321x_resume_reverify,
 };
 EXPORT_SYMBOL_GPL(tipd_sn201202x_data);
 
