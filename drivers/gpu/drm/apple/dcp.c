@@ -595,6 +595,23 @@ int apple_dcp_tb_dp_tunnel(struct device_node *connector_np, unsigned int dpin,
 		if (!dcp_typec_route_available(candidate))
 			continue;
 		score = dcp_typec_route_score(candidate);
+		/*
+		 * j416s-specific, not in the reference (t8103 has a single
+		 * dcpext): prefer a pipeline with no fixed output of its own
+		 * (dcpext1, USB-C only) over one that can also drive a fixed
+		 * HDMI/DP output (dcpext0). dcp_typec_route_available()
+		 * already excludes dcpext0 while its fixed output is
+		 * actually live, but a plain CRTC-index comparison otherwise
+		 * lets dcpext0 win a tunnel route whenever nothing is
+		 * plugged into HDMI -- confirmed on real hardware (2026-09-24
+		 * candidate 0127's first boot: the tunnel routed to
+		 * dcp@289c00000/dcpext0 instead of dcp@315c00000/dcpext1,
+		 * every prior candidate's own working AFK target). Matches
+		 * the same bias the pre-port dcp_typec_route_score_usb4()
+		 * applied for exactly this reason.
+		 */
+		if (candidate->dcp->fixed_phy)
+			score += 100;
 		if (score < best_score) {
 			best = candidate;
 			best_score = score;
