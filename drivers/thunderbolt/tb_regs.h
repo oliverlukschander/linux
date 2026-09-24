@@ -434,6 +434,13 @@ struct tb_regs_port_header {
  * (t8103, hardware-tested); candidate 0131, see notes/2026-09-24-0131-*.md.
  */
 #define ADP_DP_CS_3_HPD_PROPAGATE		BIT(10)
+/*
+ * Apple silicon host: hold the DP OUT (hub-side) adapter's own link
+ * training off while a tunnel is up -- the host's DPTX trains the sink
+ * through the tunnel itself. Same source as HPD_PROPAGATE above;
+ * candidate 0132, see notes/2026-09-24-0132-*.md.
+ */
+#define ADP_DP_CS_3_NO_AUTO_LT			BIT(8)
 #define DP_LOCAL_CAP				0x04
 #define DP_REMOTE_CAP				0x05
 /* For DP IN adapter */
